@@ -1,0 +1,48 @@
+# MilkChat (Flutter Web) на Apache / REG.RU, корень поддомена milk.lozhka.fun.
+# Влияет только на папку этого сайта — lozhka.fun и app.lozhka.fun не затрагивает.
+
+Options -Indexes
+DirectoryIndex index.html
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # Всегда HTTPS (сертификат Let's Encrypt выпускается в ISPmanager).
+  RewriteCond %{HTTPS} !=on
+  RewriteCond %{HTTP:X-Forwarded-Proto} !=https
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+  # SPA fallback: всё, что не файл и не папка, отдаём index.html.
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+  RewriteRule ^ index.html [L]
+</IfModule>
+
+<IfModule mod_mime.c>
+  AddType application/wasm .wasm
+  AddType application/javascript .js .mjs
+  AddType application/manifest+json .webmanifest
+  AddType font/otf .otf
+  AddType font/ttf .ttf
+</IfModule>
+
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/css application/javascript application/json application/wasm image/svg+xml
+</IfModule>
+
+<IfModule mod_headers.c>
+  # index.html, загрузчик и service worker не кэшируем — иначе после
+  # обновления сайта браузер может держать старую версию.
+  <FilesMatch "^(index\.html|flutter_bootstrap\.js|flutter_service_worker\.js|version\.json|manifest\.json)$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+  </FilesMatch>
+  <FilesMatch "\.(js|wasm|ttf|otf|png|jpg|svg|json)$">
+    Header set Cache-Control "public, max-age=604800"
+  </FilesMatch>
+  # Нужно для всплывающего окна входа через Google.
+  Header set Cross-Origin-Opener-Policy "same-origin-allow-popups"
+  Header set X-Content-Type-Options "nosniff"
+  Header set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>

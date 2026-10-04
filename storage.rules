@@ -1,0 +1,22 @@
+rules_version = '2';
+
+// Правила Firebase Storage для MilkChat. Публикация: firebase deploy --only storage
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Аватарки: читать могут все вошедшие, писать — только владелец в свою папку,
+    // только картинки PNG/JPEG/WEBP/GIF и не больше 2 МБ.
+    match /avatars/{userId}/{fileName} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.size < 2 * 1024 * 1024
+        && request.resource.contentType.matches('image/(png|jpeg|webp|gif)');
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Всё остальное закрыто.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,7 +1,8 @@
 # MilkChat 🥛
 
-Мессенджер и соцсеть для **Android, веба и десктопа** (Windows, macOS, Linux) на одной кодовой базе Flutter.
-Сервер — [Supabase](https://supabase.com): вход по почте, сообщения в реальном времени, хранилище аватарок.
+Мессенджер и соцсеть для **Android, веба и десктопа** на одной кодовой базе Flutter.
+Сервер — [Firebase](https://firebase.google.com) (проект `milkchat-915d4`): Authentication, Firestore, Storage.
+Веб-версия: https://milk.lozhka.fun
 
 | Чаты | Переписка | Оформление | Выделение |
 |---|---|---|---|
@@ -9,68 +10,45 @@
 
 ![Десктоп](docs/screenshots/desktop.png)
 
-## Что уже есть
+## Что умеет
 
-- Вход и регистрация (почта + пароль, юзернейм).
-- Чаты: личные, группы, каналы и «Избранное». Поиск по чатам и по людям.
-- Переписка с узорным фоном, разделителями дат, галочками «доставлено/прочитано».
-- Долгое нажатие на чат → выделение: закрепить, прочитать, без звука, в архив, удалить.
-- Профиль группы/собеседника, создание групп и каналов, контакты.
-- Мой профиль: аватарка, имя, юзернейм, «о себе».
-- Настройки и лист «Оформление»: светлая/тёмная тема, 8 цветов, плавающие фигуры и узор на фоне.
-- На широком экране (десктоп, веб) список чатов и переписка показываются рядом.
+- Регистрация и вход по почте с подтверждением адреса, сброс пароля, вход через Google.
+- Личные чаты, группы и каналы — создаёт сам пользователь. Официальный канал MilkChat.
+- Сообщения в реальном времени, отметки о прочтении, редактирование и удаление по правам.
+- Выделение чатов: закрепить, прочитать, без звука, в архив, удалить.
+- Профиль с аватаркой (Firebase Storage), настройки и лист «Оформление».
 
-## Запуск
+## Firebase
 
-Нужен [Flutter](https://docs.flutter.dev/get-started/install) (stable).
+| Файл | Что это |
+|---|---|
+| `lib/firebase_options.dart` | публичный конфиг веб-приложения (не секрет) |
+| `firestore.rules`, `storage.rules` | правила доступа; проверка — `tool/rules-test` |
+| `firebase.json`, `.firebaserc` | для `firebase deploy --only firestore:rules,storage` |
+| `tool/admin/verify.mjs` | галочка и роль модератора через Custom Claims (запускается владельцем) |
 
-```bash
-flutter pub get
-flutter run -d chrome     # веб
-flutter run -d windows    # или macos / linux
-flutter run               # подключённый Android
-```
+Структура Firestore: `users`, `usernames`, `user_settings/{uid}/chats`, `chats` (личные, группы,
+каналы) с подколлекцией `messages`, `reports`.
 
-Без ключей Supabase приложение стартует в **демо-режиме**: данные живут в памяти, собеседники отвечают сами.
+## Сборка и выкладка на REG.RU
 
-## Подключение сервера
+Workflow [`build-web.yml`](.github/workflows/build-web.yml) собирает `flutter build web --release --base-href /`
+и сохраняет артефакт **milkchat-web** (вместе с `.htaccess`). Его содержимое загружается в корень
+сайта `milk.lozhka.fun` в ISPmanager. Остальные платформы собирает [`build.yml`](.github/workflows/build.yml).
 
-1. Создайте проект на [supabase.com](https://supabase.com).
-2. Откройте **SQL Editor**, вставьте содержимое [`supabase/schema.sql`](supabase/schema.sql) и выполните.
-3. Возьмите **Project URL** и **Publishable key** (Project Settings → API Keys) и запускайте так:
-
-```bash
-flutter run --dart-define=SUPABASE_URL=https://xxxx.supabase.co \
-            --dart-define=SUPABASE_KEY=sb_publishable_xxxx
-```
-
-Чтобы готовые сборки из GitHub Actions тоже подключались к серверу, добавьте те же значения
-в **Settings → Secrets and variables → Actions** как `SUPABASE_URL` и `SUPABASE_KEY`.
-
-## Сборки
-
-Workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) на каждый push проверяет код,
-прогоняет тесты и собирает веб, APK, Windows, Linux и macOS — файлы лежат во вкладке **Actions → Artifacts**.
-
-Вручную:
-
-```bash
-flutter build web          # build/web
-flutter build apk          # build/app/outputs/flutter-apk/app-release.apk
-flutter build windows      # build/windows/x64/runner/Release
-```
+Локально: `flutter pub get && flutter run -d chrome`.
 
 ## Структура
 
 ```
 lib/
-  data/        источник данных: Supabase и демо
+  data/        FirebaseRepository и общий интерфейс ChatRepository
   models/      пользователь, чат, сообщение
   screens/     экраны: вход, чаты, переписка, контакты, профиль, настройки, темы
   theme/       палитра из акцентного цвета, светлая и тёмная темы
   widgets/     аватарки, плитки, фон с узором, логотип
-supabase/      схема базы, права доступа, функции
-tool/          генерация иконок (python3 tool/make_icons.py)
+web/.htaccess  SPA-fallback, HTTPS и кэш для Apache
+tool/          иконки, админ-скрипт, тест правил
 ```
 
 Шрифт Nunito — SIL Open Font License (`assets/fonts/OFL.txt`).

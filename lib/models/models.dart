@@ -56,14 +56,6 @@ class Profile {
       );
 }
 
-/// Аккаунты команды MilkChat, которым в демо-режиме выдаётся галочка.
-/// На сервере галочку ставит администратор (см. конец supabase/schema.sql),
-/// иначе её получил бы любой, кто первым займёт такой юзернейм.
-const officialUsernames = {'milkdev', 'milkchat'};
-
-bool isOfficialUsername(String username) =>
-    officialUsernames.contains(username.toLowerCase());
-
 enum ChatKind { direct, group, channel, saved }
 
 extension ChatKindLabel on ChatKind {

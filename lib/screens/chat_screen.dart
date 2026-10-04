@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../data/chat_repository.dart';
+import '../data/firebase_repository.dart';
 import '../models/models.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
@@ -401,15 +402,7 @@ class _Bubble extends StatelessWidget {
     const small = Radius.circular(8);
 
     final bubble = GestureDetector(
-      onLongPress: () {
-        Clipboard.setData(ClipboardData(text: message.text));
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Текст скопирован'),
-            duration: Duration(seconds: 1),
-          ),
-        );
-      },
+      onLongPress: () => _showActions(context),
       child: Container(
         constraints: BoxConstraints(
           maxWidth: MediaQuery.sizeOf(context).width * 0.72,
@@ -494,6 +487,70 @@ class _Bubble extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+extension on _Bubble {
+  /// Копировать всем; изменить — автору; удалить — автору или админу
+  /// (окончательно права проверяют правила Firestore).
+  Future<void> _showActions(BuildContext context) async {
+    final repo = context.read<ChatRepository>();
+    final fb = repo is FirebaseRepository ? repo : null;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.copy_rounded),
+            title: const Text('Копировать'),
+            onTap: () => Navigator.pop(ctx, 'copy'),
+          ),
+          if (fb != null && mine)
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Изменить'),
+              onTap: () => Navigator.pop(ctx, 'edit'),
+            ),
+          if (fb != null)
+            ListTile(
+              leading: const Icon(Icons.delete_outline_rounded, color: Color(0xFFFF6B6B)),
+              title: const Text('Удалить', style: TextStyle(color: Color(0xFFFF6B6B))),
+              onTap: () => Navigator.pop(ctx, 'delete'),
+            ),
+        ]),
+      ),
+    );
+    if (!context.mounted || action == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      switch (action) {
+        case 'copy':
+          await Clipboard.setData(ClipboardData(text: message.text));
+          messenger.showSnackBar(const SnackBar(content: Text('Текст скопирован')));
+        case 'edit':
+          final c = TextEditingController(text: message.text);
+          final text = await showDialog<String>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Изменить сообщение'),
+              content: TextField(controller: c, autofocus: true, maxLines: 5, minLines: 1),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, c.text.trim()),
+                    child: const Text('Сохранить')),
+              ],
+            ),
+          );
+          if (text != null && text.isNotEmpty && text != message.text) {
+            await fb!.editMessage(message.chatId, message.id, text);
+          }
+        case 'delete':
+          await fb!.deleteMessage(message.chatId, message.id);
+      }
+    } on AuthFailure catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(e.message)));
+    }
   }
 }
 

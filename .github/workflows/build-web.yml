@@ -1,0 +1,30 @@
+name: Build Web (REG.RU)
+
+# Собирает веб-версию для https://milk.lozhka.fun. Готовая папка — артефакт
+# milkchat-web: её содержимое загружается в корень сайта через ISPmanager.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - run: flutter build web --release --base-href /
+      - name: Проверить, что .htaccess попал в сборку
+        run: test -f build/web/.htaccess
+      - uses: actions/upload-artifact@v4
+        with:
+          name: milkchat-web
+          path: build/web
+          include-hidden-files: true

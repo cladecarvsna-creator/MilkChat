@@ -1,13 +1,12 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import '../models/models.dart';
-import 'chat_repository.dart';
+import 'package:milkchat/models/models.dart';
+import 'package:milkchat/data/chat_repository.dart';
 
-/// Локальный режим без сервера: данные живут в памяти. Нужен, чтобы приложение
-/// можно было запустить и посмотреть сразу, до настройки Supabase.
-class DemoRepository extends ChatRepository {
-  DemoRepository() {
+/// Хранилище в памяти для виджет-тестов. В приложении не используется.
+class FakeRepository extends ChatRepository {
+  FakeRepository() {
     _seed();
   }
 
@@ -25,9 +24,6 @@ class DemoRepository extends ChatRepository {
 
   @override
   Profile? get me => _me;
-
-  @override
-  bool get isDemo => true;
 
   String _id() => 'd${_seq++}';
 
@@ -110,7 +106,7 @@ class DemoRepository extends ChatRepository {
     _me = _users['me'] = _users['me']!.copyWith(
       username: username,
       displayName: displayName,
-      verified: isOfficialUsername(username),
+
     );
     notifyListeners();
   }
@@ -133,8 +129,7 @@ class DemoRepository extends ChatRepository {
         displayName: displayName,
         username: username,
         bio: bio,
-        avatarBytes: avatarBytes,
-        verified: username == null ? null : isOfficialUsername(username));
+        avatarBytes: avatarBytes);
     notifyListeners();
   }
 
