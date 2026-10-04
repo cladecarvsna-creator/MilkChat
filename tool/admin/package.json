@@ -1,0 +1,12 @@
+{
+  "name": "milkchat-admin",
+  "private": true,
+  "description": "Серверные операции MilkChat через Firebase Admin SDK (запускаются владельцем локально).",
+  "type": "module",
+  "scripts": {
+    "verify": "node verify.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  }
+}

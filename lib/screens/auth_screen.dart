@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:supabase_flutter/supabase_flutter.dart' show AuthException;
 
 import '../data/chat_repository.dart';
+import '../data/firebase_repository.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common.dart';
 
@@ -33,7 +33,7 @@ class _AuthScreenState extends State<AuthScreen> {
 
   Future<void> _submit() async {
     final repo = context.read<ChatRepository>();
-    if (!repo.isDemo && !_form.currentState!.validate()) return;
+    if (!_form.currentState!.validate()) return;
     setState(() {
       _busy = true;
       _error = null;
@@ -49,7 +49,7 @@ class _AuthScreenState extends State<AuthScreen> {
       } else {
         await repo.signIn(email: _email.text.trim(), password: _password.text);
       }
-    } on AuthException catch (e) {
+    } on AuthFailure catch (e) {
       setState(() => _error = e.message);
     } catch (e) {
       setState(() => _error = 'Не получилось: $e');
@@ -58,10 +58,42 @@ class _AuthScreenState extends State<AuthScreen> {
     }
   }
 
+  Future<void> _google() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await context.read<ChatRepository>().signInWithGoogle();
+    } on AuthFailure catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _forgot() async {
+    final email = _email.text.trim();
+    if (!email.contains('@')) {
+      setState(() => _error = 'Введите почту, на неё придёт ссылка для сброса пароля');
+      return;
+    }
+    try {
+      await context.read<ChatRepository>().resetPassword(email);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Письмо для сброса пароля отправлено на $email')),
+        );
+      }
+    } on AuthFailure catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    final demo = context.read<ChatRepository>().isDemo;
+    final google = context.read<ChatRepository>().supportsGoogle;
     return Scaffold(
       body: ChatBackground(
         child: Center(
@@ -121,10 +153,28 @@ class _AuthScreenState extends State<AuthScreen> {
                             ? const SizedBox.square(
                                 dimension: 22,
                                 child: CircularProgressIndicator(strokeWidth: 2.5))
-                            : Text(demo
-                                ? 'Войти в демо'
-                                : (_register ? 'Зарегистрироваться' : 'Войти')),
+                            : Text(_register ? 'Зарегистрироваться' : 'Войти'),
                       ),
+                      if (google) ...[
+                        const SizedBox(height: 10),
+                        OutlinedButton.icon(
+                          onPressed: _busy ? null : _google,
+                          icon: const Text('G',
+                              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18)),
+                          label: const Text('Войти через Google'),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: p.text,
+                            minimumSize: const Size.fromHeight(52),
+                            shape: const StadiumBorder(),
+                            side: BorderSide(color: p.title.withValues(alpha: 0.5)),
+                          ),
+                        ),
+                      ],
+                      if (!_register)
+                        TextButton(
+                          onPressed: _busy ? null : _forgot,
+                          child: Text('Забыли пароль?', style: TextStyle(color: p.muted)),
+                        ),
                       const SizedBox(height: 8),
                       TextButton(
                         onPressed: () => setState(() => _register = !_register),
@@ -133,13 +183,6 @@ class _AuthScreenState extends State<AuthScreen> {
                           style: TextStyle(color: p.title),
                         ),
                       ),
-                      if (demo)
-                        Text(
-                          'Демо-режим: сервер не подключён, данные хранятся только '
-                          'в этом окне. Можно оставить поля пустыми.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: p.muted, fontSize: 12),
-                        ),
                     ],
                   ),
                 ),
@@ -173,4 +216,64 @@ class _AuthScreenState extends State<AuthScreen> {
           ),
         ),
       );
+}
+
+/// Экран после регистрации по почте: просим подтвердить адрес.
+class VerifyEmailScreen extends StatelessWidget {
+  const VerifyEmailScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final repo = context.read<ChatRepository>() as FirebaseRepository;
+    return Scaffold(
+      body: ChatBackground(
+        child: Center(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420),
+            margin: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(28),
+            decoration: BoxDecoration(color: p.surface, borderRadius: BorderRadius.circular(36)),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Icon(Icons.mark_email_unread_outlined, size: 64, color: p.accent),
+                const SizedBox(height: 16),
+                Text('Подтвердите почту',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: p.text)),
+                const SizedBox(height: 8),
+                Text('Мы отправили письмо со ссылкой. Откройте её и нажмите «Я подтвердил».',
+                    textAlign: TextAlign.center, style: TextStyle(color: p.muted)),
+                const SizedBox(height: 20),
+                FilledButton(onPressed: repo.reloadUser, child: const Text('Я подтвердил')),
+                TextButton(
+                  onPressed: () async {
+                    try {
+                      await repo.resendVerification();
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Письмо отправлено ещё раз')));
+                      }
+                    } on AuthFailure catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context)
+                            .showSnackBar(SnackBar(content: Text(e.message)));
+                      }
+                    }
+                  },
+                  child: Text('Отправить письмо ещё раз', style: TextStyle(color: p.title)),
+                ),
+                TextButton(
+                  onPressed: repo.signOut,
+                  child: Text('Выйти', style: TextStyle(color: p.muted)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }

@@ -156,6 +156,8 @@ class _NavPill extends StatelessWidget {
         ],
       ),
       child: Row(
+        // Индикатор выбора — на всю высоту панели.
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           for (var i = 0; i < _items.length; i++)
             Expanded(

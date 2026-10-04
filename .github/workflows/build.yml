@@ -1,15 +1,10 @@
-name: Build
+name: Build apps
 
 on:
   push:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
-
-env:
-  # Если в Settings → Secrets заданы SUPABASE_URL и SUPABASE_KEY, сборки
-  # подключаются к серверу; иначе запускаются в демо-режиме.
-  DEFINES: --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }} --dart-define=SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}
 
 jobs:
   test:
@@ -24,21 +19,6 @@ jobs:
       - run: flutter analyze
       - run: flutter test
 
-  web:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-      - run: flutter build web --release $DEFINES
-      - uses: actions/upload-artifact@v4
-        with:
-          name: milkchat-web
-          path: build/web
-
   android:
     needs: test
     runs-on: ubuntu-latest
@@ -52,7 +32,7 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: flutter build apk --release $DEFINES
+      - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
           name: milkchat-android
@@ -67,7 +47,7 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: flutter build windows --release --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }} --dart-define=SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}
+      - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
           name: milkchat-windows
@@ -83,7 +63,7 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: flutter build linux --release $DEFINES
+      - run: flutter build linux --release
       - uses: actions/upload-artifact@v4
         with:
           name: milkchat-linux
@@ -98,7 +78,7 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: flutter build macos --release $DEFINES
+      - run: flutter build macos --release
       - uses: actions/upload-artifact@v4
         with:
           name: milkchat-macos

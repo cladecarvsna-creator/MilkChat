@@ -1,32 +1,29 @@
 import 'dart:async';
-import 'dart:math';
 import 'dart:typed_data';
 
-import '../models/models.dart';
-import 'chat_repository.dart';
+import 'package:milkchat/models/models.dart';
+import 'package:milkchat/data/chat_repository.dart';
 
-/// Локальный режим без сервера: данные живут в памяти. Нужен, чтобы приложение
-/// можно было запустить и посмотреть сразу, до настройки Supabase.
-class DemoRepository extends ChatRepository {
-  DemoRepository() {
+/// Хранилище в памяти для виджет-тестов. В приложении не используется.
+class FakeRepository extends ChatRepository {
+  FakeRepository() {
     _seed();
   }
 
-  final _rand = Random();
   final _changes = StreamController<void>.broadcast();
   final Map<String, Profile> _users = {};
   final Map<String, ChatSummary> _chats = {};
   final Map<String, List<Message>> _messages = {};
   final Map<String, Set<String>> _members = {};
   final Map<String, String> _about = {};
+
+  /// Кто может писать в канал. В группах и личных чатах пишут все.
+  final Map<String, Set<String>> _admins = {};
   Profile? _me;
   int _seq = 0;
 
   @override
   Profile? get me => _me;
-
-  @override
-  bool get isDemo => true;
 
   String _id() => 'd${_seq++}';
 
@@ -43,84 +40,40 @@ class DemoRepository extends ChatRepository {
             verified: verified,
             bio: bio);
 
-    final me = u('me', 'milkman', 'Джек', bio: 'Пью молоко и пишу код');
-    final bot = u('bot', 'milkchat', 'MilkChat', verified: true);
-    final vova = u('vova', 'vova', 'Вова');
-    final nerix = u('nerix', 'nerixton', 'nerixton');
-    final masha = u('masha', 'masha', 'Маша Коровина', verified: true);
-    final sher = u('sher', 'sherlock', 'Sherlock');
+    u('me', 'milkman', 'Джек', bio: 'Пью молоко и пишу код');
+    final official = u('milkchat', 'milkchat', 'MilkChat', verified: true);
     // Вход выполняется на экране авторизации кнопкой «Войти в демо».
 
-    void chat(String id, ChatKind kind, String title, List<Profile> members,
-        List<(Profile, String, Duration)> msgs,
-        {String? handle,
-        String? emoji,
-        int unread = 0,
-        bool verified = false,
-        String about = ''}) {
-      _members[id] = {for (final m in members) m.id};
-      _about[id] = about;
-      _messages[id] = [
-        for (final (p, text, ago) in msgs)
-          Message(
-            id: _id(),
-            chatId: id,
-            senderId: p.id,
-            senderName: p.displayName,
-            text: text,
-            createdAt: now.subtract(ago),
-            read: true,
-          )
-      ];
-      final peer = kind == ChatKind.direct
-          ? members.firstWhere((m) => m.id != 'me')
-          : null;
-      _chats[id] = ChatSummary(
-        id: id,
-        kind: kind,
-        title: title,
-        handle: handle ?? (peer != null ? '@${peer.username}' : null),
-        avatarEmoji: emoji,
-        verified: verified,
-        unread: unread,
-        memberCount: members.length,
-        peerId: peer?.id,
-      );
-      _refreshLast(id);
-    }
-
-    const m = Duration(minutes: 1);
-    const h = Duration(hours: 1);
-    const d = Duration(days: 1);
-
-    chat('c_bot', ChatKind.direct, 'MilkChat', [me, bot], [
-      (bot, 'Добро пожаловать в MilkChat! 🥛', d * 2),
-      (bot, 'Вы вошли в аккаунт. Это демо-режим: данные хранятся только на этом устройстве.', m * 20),
-    ], unread: 2, verified: true, emoji: '🥛');
-    chat('c_cows', ChatKind.group, 'Группа Коров', [me, nerix, vova, masha], [
-      (vova, 'Кто идёт на пастбище?', d * 3),
-      (masha, 'Я! Только после обеда', d * 3 - h * 2),
-      (me, 'И я', d * 2),
-      (nerix, 'у меня спор болит', m * 45),
-    ], emoji: '🐮', about: 'Самая дружная группа на ферме');
-    chat('c_sher', ChatKind.direct, 'Sherlock', [me, sher], [
-      (sher, 'Элементарно', h * 5),
-      (me, 'Шкалаш', h * 3),
-    ]);
-    chat('c_masha', ChatKind.direct, 'Маша Коровина', [me, masha], [
-      (masha, 'Привет! Как тебе новый цвет?', h * 6),
-      (me, 'Отличный, оставляем', h * 6 - m),
-      (masha, 'Тогда так и живём', h * 6 - m * 2),
-    ], verified: true);
-    chat('c_saved', ChatKind.saved, 'Избранное', [me], [
-      (me, 'Купить молоко 🥛', d),
-    ]);
-    chat('c_news', ChatKind.channel, 'MilkChat 2.0', [me, bot, vova, nerix], [
-      (bot, 'Вышло обновление: темы и плавающие фигуры на фоне', d * 2),
-      (vova, '/app', d * 2 - h),
-      (vova, 'Работает?', h * 26),
-      (vova, 'точно', h * 4),
-    ], handle: '@milkchat', emoji: '📣', about: 'Новости MilkChat');
+    _members['c_milkchat'] = {'me', official.id};
+    _admins['c_milkchat'] = {official.id};
+    _about['c_milkchat'] = 'Официальный канал MilkChat: новости и обновления';
+    _messages['c_milkchat'] = [
+      for (final (text, ago) in [
+        ('Добро пожаловать в MilkChat! 🥛', const Duration(minutes: 20)),
+        ('Это демо-режим: данные хранятся только в этом окне. '
+            'Создавайте свои группы и каналы кнопкой «+».', const Duration(minutes: 19)),
+      ])
+        Message(
+          id: _id(),
+          chatId: 'c_milkchat',
+          senderId: official.id,
+          senderName: official.displayName,
+          text: text,
+          createdAt: now.subtract(ago),
+          read: true,
+        )
+    ];
+    _chats['c_milkchat'] = const ChatSummary(
+      id: 'c_milkchat',
+      kind: ChatKind.channel,
+      title: 'MilkChat',
+      handle: '@milkchat',
+      verified: true,
+      unread: 2,
+      memberCount: 2,
+      canPost: false,
+    );
+    _refreshLast('c_milkchat');
   }
 
   void _refreshLast(String chatId) {
@@ -153,6 +106,7 @@ class DemoRepository extends ChatRepository {
     _me = _users['me'] = _users['me']!.copyWith(
       username: username,
       displayName: displayName,
+
     );
     notifyListeners();
   }
@@ -196,6 +150,10 @@ class DemoRepository extends ChatRepository {
   @override
   Future<void> sendMessage(String chatId, String text) async {
     final me = _me!;
+    final admins = _admins[chatId];
+    if (admins != null && !admins.contains(me.id)) {
+      throw StateError('В канал пишут только администраторы');
+    }
     _messages[chatId]!.add(Message(
       id: _id(),
       chatId: chatId,
@@ -206,43 +164,6 @@ class DemoRepository extends ChatRepository {
     ));
     _refreshLast(chatId);
     _emit();
-
-    // Собеседник «прочитал» и иногда отвечает — чтобы демо выглядело живым.
-    Timer(const Duration(milliseconds: 900), () {
-      final list = _messages[chatId]!;
-      for (var i = 0; i < list.length; i++) {
-        final msg = list[i];
-        if (msg.senderId == me.id && !msg.read) {
-          list[i] = Message(
-              id: msg.id,
-              chatId: msg.chatId,
-              senderId: msg.senderId,
-              senderName: msg.senderName,
-              text: msg.text,
-              createdAt: msg.createdAt,
-              read: true);
-        }
-      }
-      _refreshLast(chatId);
-      _emit();
-    });
-    final chat = _chats[chatId]!;
-    final others = _members[chatId]!.where((id) => id != me.id).toList();
-    if (chat.kind == ChatKind.saved || others.isEmpty) return;
-    Timer(Duration(milliseconds: 1500 + _rand.nextInt(1500)), () {
-      final who = _users[others[_rand.nextInt(others.length)]]!;
-      const replies = ['Ага 👍', 'Мууу 🐮', 'Согласен', 'Ха-ха', 'Позже отвечу', 'Точно!'];
-      _messages[chatId]!.add(Message(
-        id: _id(),
-        chatId: chatId,
-        senderId: who.id,
-        senderName: who.displayName,
-        text: replies[_rand.nextInt(replies.length)],
-        createdAt: DateTime.now(),
-      ));
-      _refreshLast(chatId);
-      _emit();
-    });
   }
 
   @override
@@ -298,6 +219,7 @@ class DemoRepository extends ChatRepository {
   }) async {
     final id = _id();
     _members[id] = {_me!.id, ...memberIds};
+    if (channel) _admins[id] = {_me!.id};
     _messages[id] = [];
     _chats[id] = ChatSummary(
       id: id,
@@ -341,6 +263,7 @@ class DemoRepository extends ChatRepository {
       _chats.remove(id);
       _messages.remove(id);
       _members.remove(id);
+      _admins.remove(id);
     }
     _emit();
   }

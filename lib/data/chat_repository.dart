@@ -2,13 +2,32 @@ import 'package:flutter/foundation.dart';
 
 import '../models/models.dart';
 
-/// Источник данных MilkChat. Есть две реализации:
-/// [SupabaseRepository] (реальный сервер) и [DemoRepository] (локально, без сети).
+/// Понятная пользователю ошибка входа или запроса.
+class AuthFailure implements Exception {
+  const AuthFailure(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+/// Источник данных MilkChat. В приложении — [FirebaseRepository];
+/// в тестах — локальная подделка из test/fake_repository.dart.
 abstract class ChatRepository extends ChangeNotifier {
   /// Текущий пользователь или null, если не выполнен вход.
   Profile? get me;
 
-  bool get isDemo;
+
+  /// Сессия есть, но профиль ещё загружается — показываем индикатор.
+  bool get loading => false;
+
+  /// Можно ли войти через Google на этой платформе.
+  bool get supportsGoogle => false;
+
+  Future<void> signInWithGoogle() =>
+      Future.error(UnsupportedError('Вход через Google здесь недоступен'));
+
+  Future<void> resetPassword(String email) =>
+      Future.error(UnsupportedError('Сброс пароля здесь недоступен'));
 
   Future<void> signIn({required String email, required String password});
   Future<void> signUp({

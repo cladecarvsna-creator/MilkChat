@@ -3,7 +3,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 
 import 'data/chat_repository.dart';
-import 'data/supabase_repository.dart';
+import 'data/firebase_repository.dart';
 import 'screens/auth_screen.dart';
 import 'screens/home_shell.dart';
 import 'theme/app_theme.dart';
@@ -34,8 +34,11 @@ class _AuthGate extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final repo = context.watch<ChatRepository>();
-    if (repo is SupabaseRepository && repo.loading) {
+    if (repo.loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (repo is FirebaseRepository && repo.needsEmailVerification) {
+      return const VerifyEmailScreen();
     }
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 300),

@@ -1,0 +1,13 @@
+{
+  "name": "milkchat-rules-test",
+  "private": true,
+  "type": "module",
+  "description": "Проверка firestore.rules в эмуляторе: npm install && npm test",
+  "scripts": {
+    "test": "cp ../../firestore.rules . && firebase emulators:exec --only firestore --project milkchat-915d4 'node test.mjs'"
+  },
+  "dependencies": {
+    "@firebase/rules-unit-testing": "^4.0.0",
+    "firebase": "^12.0.0"
+  }
+}
