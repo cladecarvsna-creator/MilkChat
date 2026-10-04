@@ -20,7 +20,7 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
-      - run: flutter build web --release --base-href /
+      - run: flutter build web --release --base-href / --dart-define=BUILD=${GITHUB_SHA::7}
       - name: Проверить, что .htaccess попал в сборку
         run: test -f build/web/.htaccess
       - uses: actions/upload-artifact@v4

@@ -58,6 +58,29 @@ class FirebaseRepository extends ChatRepository {
   /// а правила Firestore проверяют её сами — флаг лишь показывает админку.
   bool get isStaff => _staff;
 
+  /// Почему не удалось прочитать роль (показывается в «О MilkChat»).
+  String? roleError;
+
+  /// Перечитывает роль из свежего токена — после выдачи прав не нужно перезаходить.
+  Future<void> refreshRole() async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    try {
+      final token = await user.getIdTokenResult(true);
+      final staff = token.claims?['staff'] == true;
+      roleError = null;
+      if (staff != _staff) {
+        _staff = staff;
+        notifyListeners();
+      }
+    } catch (e) {
+      roleError = '$e';
+      debugPrint('MilkChat: роль не прочитана: $e');
+    }
+  }
+
+  String? get uid => _auth.currentUser?.uid;
+
   String get _uid => _auth.currentUser!.uid;
 
   CollectionReference<Map<String, dynamic>> get _users => _db.collection('users');
@@ -81,12 +104,7 @@ class FirebaseRepository extends ChatRepository {
     notifyListeners();
     try {
       await _ensureProfile(user);
-      try {
-        final token = await user.getIdTokenResult(true);
-        _staff = token.claims?['staff'] == true;
-      } catch (_) {
-        _staff = false;
-      }
+      await refreshRole();
       _meSub = _users.doc(user.uid).snapshots().listen((s) {
         if (!s.exists) return;
         _me = _profileFrom(s);
