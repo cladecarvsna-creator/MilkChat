@@ -1,0 +1,42 @@
+# Выдаёт аккаунту галочку и роль модератора (админку) через Custom Claims.
+# Запуск: Actions → Grant admin → Run workflow → почта аккаунта.
+# Нужен секрет FIREBASE_SERVICE_ACCOUNT (Settings → Secrets → Actions) с
+# содержимым JSON-ключа сервисного аккаунта Firebase. В репозиторий ключ не кладём.
+name: Grant admin
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: Почта аккаунта (например, MilkDev)
+        required: true
+      revoke:
+        description: Снять роль вместо выдачи
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  grant:
+    runs-on: ubuntu-latest
+    if: github.actor == github.repository_owner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        working-directory: tool/admin
+        run: npm install --no-audit --no-fund
+      - name: Grant
+        working-directory: tool/admin
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          EMAIL: ${{ inputs.email }}
+          REVOKE: ${{ inputs.revoke && '--revoke' || '' }}
+        run: |
+          if [ -z "$SA" ]; then echo "Добавьте секрет FIREBASE_SERVICE_ACCOUNT"; exit 1; fi
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json" node verify.mjs "$EMAIL" $REVOKE

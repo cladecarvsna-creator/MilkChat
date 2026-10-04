@@ -10,6 +10,7 @@ class Profile {
     this.bio = '',
     this.avatarUrl,
     this.verified = false,
+    this.banned = false,
     this.lastSeen,
     this.avatarBytes,
   });
@@ -20,6 +21,9 @@ class Profile {
   final String bio;
   final String? avatarUrl;
   final bool verified;
+
+  /// Заблокирован модератором: не может писать и создавать чаты.
+  final bool banned;
   final DateTime? lastSeen;
 
   /// Аватарка, выбранная в демо-режиме (без загрузки на сервер).
@@ -51,6 +55,7 @@ class Profile {
         bio: bio ?? this.bio,
         avatarUrl: avatarUrl,
         verified: verified ?? this.verified,
+        banned: banned,
         lastSeen: lastSeen,
         avatarBytes: avatarBytes ?? this.avatarBytes,
       );
@@ -233,4 +238,48 @@ Color avatarColorFor(String seed) {
     h = (h * 31 + c) & 0x7fffffff;
   }
   return palette[h % palette.length];
+}
+
+/// Счётчики для админки.
+class AdminStats {
+  const AdminStats({
+    required this.users,
+    required this.banned,
+    required this.groups,
+    required this.channels,
+    required this.directs,
+    required this.reports,
+  });
+  final int users, banned, groups, channels, directs, reports;
+}
+
+/// Группа или канал в админке.
+class AdminChat {
+  const AdminChat({
+    required this.id,
+    required this.title,
+    required this.channel,
+    required this.members,
+    required this.verified,
+    required this.createdBy,
+  });
+  final String id, title, createdBy;
+  final bool channel, verified;
+  final int members;
+}
+
+/// Жалоба пользователя на сообщение.
+class Report {
+  const Report({
+    required this.id,
+    required this.reporterId,
+    required this.chatId,
+    this.messageId,
+    this.targetId,
+    required this.text,
+    this.createdAt,
+  });
+  final String id, reporterId, chatId, text;
+  final String? messageId, targetId;
+  final DateTime? createdAt;
 }

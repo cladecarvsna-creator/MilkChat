@@ -131,7 +131,9 @@ class _ChatScreenState extends State<ChatScreen> {
                     },
                   ),
                 ),
-                if (chat == null || chat.canPost)
+                if (_repo.me?.banned ?? false)
+                  const _ReadOnlyBar(text: 'Ваш аккаунт заблокирован модератором')
+                else if (chat == null || chat.canPost)
                   _Composer(controller: _input, focus: _focus, onSend: _send)
                 else
                   const _ReadOnlyBar(),
@@ -146,7 +148,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
 /// Вместо поля ввода в канале, где писать могут только администраторы.
 class _ReadOnlyBar extends StatelessWidget {
-  const _ReadOnlyBar();
+  const _ReadOnlyBar({this.text = 'Писать в этот канал могут только администраторы'});
+  final String text;
 
   @override
   Widget build(BuildContext context) {
@@ -162,7 +165,7 @@ class _ReadOnlyBar extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.all(22),
           child: Text(
-            'Писать в этот канал могут только администраторы',
+            text,
             textAlign: TextAlign.center,
             style: TextStyle(color: p.muted, fontSize: 15),
           ),
@@ -517,6 +520,12 @@ extension on _Bubble {
               title: const Text('Удалить', style: TextStyle(color: Color(0xFFFF6B6B))),
               onTap: () => Navigator.pop(ctx, 'delete'),
             ),
+          if (fb != null && !mine)
+            ListTile(
+              leading: const Icon(Icons.flag_outlined),
+              title: const Text('Пожаловаться'),
+              onTap: () => Navigator.pop(ctx, 'report'),
+            ),
         ]),
       ),
     );
@@ -547,6 +556,9 @@ extension on _Bubble {
           }
         case 'delete':
           await fb!.deleteMessage(message.chatId, message.id);
+        case 'report':
+          await fb!.report(message);
+          messenger.showSnackBar(const SnackBar(content: Text('Жалоба отправлена модераторам')));
       }
     } on AuthFailure catch (e) {
       messenger.showSnackBar(SnackBar(content: Text(e.message)));

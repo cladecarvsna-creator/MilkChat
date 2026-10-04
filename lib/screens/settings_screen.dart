@@ -4,8 +4,10 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../data/chat_repository.dart';
+import '../data/firebase_repository.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common.dart';
+import 'admin_screen.dart';
 import 'home_shell.dart';
 import 'theme_sheet.dart';
 
@@ -171,9 +173,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    final me = context.watch<ChatRepository>().me!;
+    final repo = context.watch<ChatRepository>();
+    final me = repo.me!;
     final q = _query.toLowerCase();
     final groups = [
+      if (repo is FirebaseRepository && repo.isStaff)
+        [
+          _Item(Icons.admin_panel_settings_outlined, const Color(0xFFF59E0B), 'Админка',
+              'Пользователи, каналы, жалобы', (c) {
+            Navigator.of(c).push(MaterialPageRoute(builder: (_) => const AdminScreen()));
+          }),
+        ],
       for (final g in _groups)
         [
           for (final i in g)
