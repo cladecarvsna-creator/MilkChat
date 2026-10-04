@@ -337,38 +337,9 @@ class MilkLogo extends StatelessWidget {
   final double size;
 
   @override
-  Widget build(BuildContext context) => SizedBox.square(
-        dimension: size,
-        child: CustomPaint(painter: _LogoPainter()),
+  Widget build(BuildContext context) => ClipRRect(
+        borderRadius: BorderRadius.circular(size * 0.24),
+        child: Image.asset('assets/icon/icon.png',
+            width: size, height: size, filterQuality: FilterQuality.medium),
       );
-}
-
-class _LogoPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final s = size.width;
-    final rect = RRect.fromRectAndRadius(Offset.zero & size, Radius.circular(s * 0.24));
-    canvas.drawRRect(rect, Paint()..color = const Color(0xFF22DD44));
-    final fg = Paint()..color = const Color(0xFF1B5230);
-    const cx = 0.5, cy = 0.47, r = 0.30;
-    final path = Path();
-    for (var i = 0; i <= 360; i++) {
-      final a = 2 * math.pi * i / 360;
-      final rr = r + 0.03 * math.cos(6 * a).abs();
-      final p = Offset((cx + rr * math.cos(a)) * s, (cy + rr * math.sin(a)) * s);
-      i == 0 ? path.moveTo(p.dx, p.dy) : path.lineTo(p.dx, p.dy);
-    }
-    canvas.drawPath(path..close(), fg);
-    canvas.drawPath(
-      Path()
-        ..moveTo((cx - r * 0.62) * s, (cy + r * 0.55) * s)
-        ..lineTo((cx - r * 0.86) * s, (cy + r * 1.30) * s)
-        ..lineTo((cx - r * 0.15) * s, (cy + r * 0.92) * s)
-        ..close(),
-      fg,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
