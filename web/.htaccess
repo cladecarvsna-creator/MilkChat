@@ -32,13 +32,14 @@ ErrorDocument 404 /404.html
 </IfModule>
 
 <IfModule mod_headers.c>
-  # index.html, загрузчик и service worker не кэшируем — иначе после
-  # обновления сайта браузер может держать старую версию.
-  <FilesMatch "^(index\.html|404\.html|flutter_bootstrap\.js|flutter_service_worker\.js|version\.json|manifest\.json)$">
-    Header set Cache-Control "no-cache, no-store, must-revalidate"
-  </FilesMatch>
+  # Картинки, шрифты и движок кэшируем на неделю. Код приложения, index.html
+  # и загрузчик — нет: правило ниже должно идти после общего, иначе после
+  # обновления сайта браузер неделю держит старую версию.
   <FilesMatch "\.(js|wasm|ttf|otf|png|jpg|svg|json)$">
     Header set Cache-Control "public, max-age=604800"
+  </FilesMatch>
+  <FilesMatch "^(index\.html|404\.html|main\.dart\.(js|mjs|wasm)|flutter_bootstrap\.js|flutter_service_worker\.js|version\.json|manifest\.json)$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
   </FilesMatch>
   # Нужно для всплывающего окна входа через Google.
   Header set Cross-Origin-Opener-Policy "same-origin-allow-popups"
