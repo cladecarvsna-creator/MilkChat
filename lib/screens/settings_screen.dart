@@ -30,6 +30,13 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   String _query = '';
 
+  @override
+  void initState() {
+    super.initState();
+    final repo = context.read<ChatRepository>();
+    if (repo is FirebaseRepository) repo.refreshRole();
+  }
+
   static void _soon(BuildContext context, String title) => showModalBottomSheet(
         context: context,
         builder: (ctx) => Padding(
@@ -77,13 +84,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ],
   ];
 
-  static void _about(BuildContext context) => showAboutDialog(
-        context: context,
-        applicationName: 'MilkChat',
-        applicationVersion: '1.0.0',
-        applicationIcon: const MilkLogo(size: 56),
-        applicationLegalese: 'Мессенджер для своих 🥛',
-      );
+  static void _about(BuildContext context) {
+    final repo = context.read<ChatRepository>();
+    final fb = repo is FirebaseRepository ? repo : null;
+    showAboutDialog(
+      context: context,
+      applicationName: 'MilkChat',
+      applicationVersion: '1.0.0 · сборка $_build',
+      applicationIcon: const MilkLogo(size: 56),
+      applicationLegalese: 'Мессенджер для своих 🥛',
+      children: [
+        if (fb != null) ...[
+          const SizedBox(height: 16),
+          SelectableText('Роль: ${fb.isStaff ? 'модератор' : 'пользователь'}\n'
+              'UID: ${fb.uid ?? '—'}'
+              '${fb.roleError == null ? '' : '\nОшибка роли: ${fb.roleError}'}'),
+        ],
+      ],
+    );
+  }
+
+  /// Коммит, из которого собрано приложение (передаётся в CI через --dart-define).
+  static const _build = String.fromEnvironment('BUILD', defaultValue: 'local');
 
   static void _devices(BuildContext context) {
     final p = context.palette;
