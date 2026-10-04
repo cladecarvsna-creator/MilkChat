@@ -13,12 +13,11 @@ DirectoryIndex index.html
   RewriteCond %{HTTP:X-Forwarded-Proto} !=https
   RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
 
-  # SPA fallback: всё, что не файл и не папка, отдаём index.html.
-  RewriteCond %{REQUEST_FILENAME} -f [OR]
-  RewriteCond %{REQUEST_FILENAME} -d
-  RewriteRule ^ - [L]
-  RewriteRule ^ index.html [L]
 </IfModule>
+
+# Приложение живёт на одном адресе (/), внутренние экраны адрес не меняют.
+# Поэтому всё, чего нет на сервере, — настоящая 404 со своей страницей.
+ErrorDocument 404 /404.html
 
 <IfModule mod_mime.c>
   AddType application/wasm .wasm
@@ -35,7 +34,7 @@ DirectoryIndex index.html
 <IfModule mod_headers.c>
   # index.html, загрузчик и service worker не кэшируем — иначе после
   # обновления сайта браузер может держать старую версию.
-  <FilesMatch "^(index\.html|flutter_bootstrap\.js|flutter_service_worker\.js|version\.json|manifest\.json)$">
+  <FilesMatch "^(index\.html|404\.html|flutter_bootstrap\.js|flutter_service_worker\.js|version\.json|manifest\.json)$">
     Header set Cache-Control "no-cache, no-store, must-revalidate"
   </FilesMatch>
   <FilesMatch "\.(js|wasm|ttf|otf|png|jpg|svg|json)$">
