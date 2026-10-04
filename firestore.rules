@@ -9,6 +9,10 @@ service cloud.firestore {
     function uid() { return request.auth.uid; }
     // Роль модератора выдаёт только сервер (Custom Claims через tool/admin).
     function isStaff() { return signedIn() && request.auth.token.staff == true; }
+    // Заблокированный модератором пользователь не может писать и создавать чаты.
+    function notBanned() {
+      return !get(/databases/$(database)/documents/users/$(uid())).data.get('banned', false);
+    }
     function changed() {
       return request.resource.data.diff(resource.data).affectedKeys();
     }
@@ -19,15 +23,18 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create: if signedIn() && uid() == userId
         && request.resource.data.verified == false
+        && request.resource.data.get('banned', false) == false
         && request.resource.data.username is string
         && request.resource.data.usernameLower == request.resource.data.username.lower()
         && request.resource.data.username.matches('^[A-Za-z0-9_]{3,32}$');
       // verified меняет только Admin SDK — клиенту поле недоступно.
       allow update: if signedIn() && uid() == userId
-        && !changed().hasAny(['verified', 'createdAt'])
+        && !changed().hasAny(['verified', 'banned', 'createdAt'])
         && (!('username' in changed())
             || (request.resource.data.username.matches('^[A-Za-z0-9_]{3,32}$')
                 && request.resource.data.usernameLower == request.resource.data.username.lower()));
+      // Модератор (claim staff) выдаёт галочку и блокирует — и только эти поля.
+      allow update: if isStaff() && changed().hasOnly(['verified', 'banned']);
       allow delete: if false;
     }
 
@@ -57,9 +64,9 @@ service cloud.firestore {
       // Несуществующий документ можно «прочитать» — так клиент проверяет,
       // есть ли уже личный чат.
       allow get: if signedIn() && (resource == null || isMember() || isStaff());
-      allow list: if signedIn() && uid() in resource.data.members;
+      allow list: if isStaff() || (signedIn() && uid() in resource.data.members);
 
-      allow create: if signedIn()
+      allow create: if signedIn() && notBanned()
         && request.resource.data.createdBy == uid()
         && uid() in request.resource.data.members
         && (
@@ -92,7 +99,10 @@ service cloud.firestore {
         || (isMember() && changed().hasOnly(['members', 'admins'])
           && data().members.toSet().difference(request.resource.data.members.toSet())
                == [uid()].toSet()
-          && request.resource.data.admins.toSet().difference(data().admins.toSet()).size() == 0);
+          && request.resource.data.admins.toSet().difference(data().admins.toSet()).size() == 0)
+        // Модератор: название, описание, участники, админы, галочка.
+        || (isStaff() && changed().hasOnly(['title', 'about', 'avatarUrl', 'members', 'admins',
+                                           'verified', 'lastMessage', 'lastAt']));
 
       allow delete: if isStaff();
 
@@ -103,7 +113,7 @@ service cloud.firestore {
         function admin() { return signedIn() && uid() in chat().admins; }
 
         allow read: if member() || isStaff();
-        allow create: if member()
+        allow create: if member() && notBanned()
           && (chat().kind != 'channel' || admin())
           && request.resource.data.senderId == uid()
           && request.resource.data.text is string

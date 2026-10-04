@@ -38,6 +38,7 @@ class FirebaseRepository extends ChatRepository {
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _meSub;
   Profile? _me;
   bool _loading = true;
+  bool _staff = false;
   final Map<String, Profile> _profiles = {};
 
   @override
@@ -53,6 +54,10 @@ class FirebaseRepository extends ChatRepository {
     return password && !u.emailVerified;
   }
 
+  /// Модератор MilkChat. Роль выдаётся только сервером (Custom Claim `staff`),
+  /// а правила Firestore проверяют её сами — флаг лишь показывает админку.
+  bool get isStaff => _staff;
+
   String get _uid => _auth.currentUser!.uid;
 
   CollectionReference<Map<String, dynamic>> get _users => _db.collection('users');
@@ -66,6 +71,7 @@ class FirebaseRepository extends ChatRepository {
     await _meSub?.cancel();
     _meSub = null;
     if (user == null) {
+      _staff = false;
       _me = null;
       _loading = false;
       notifyListeners();
@@ -75,6 +81,12 @@ class FirebaseRepository extends ChatRepository {
     notifyListeners();
     try {
       await _ensureProfile(user);
+      try {
+        final token = await user.getIdTokenResult(true);
+        _staff = token.claims?['staff'] == true;
+      } catch (_) {
+        _staff = false;
+      }
       _meSub = _users.doc(user.uid).snapshots().listen((s) {
         if (!s.exists) return;
         _me = _profileFrom(s);
@@ -232,6 +244,7 @@ class FirebaseRepository extends ChatRepository {
       bio: m['bio'] as String? ?? '',
       avatarUrl: m['avatarUrl'] as String?,
       verified: m['verified'] as bool? ?? false,
+      banned: m['banned'] as bool? ?? false,
       lastSeen: (m['lastSeen'] as Timestamp?)?.toDate(),
     );
     _profiles[p.id] = p;
@@ -602,6 +615,117 @@ class FirebaseRepository extends ChatRepository {
           await _settings(_uid).doc(id).delete();
         }
       });
+
+  // ─── Модерация (только claim staff; правила проверяют то же самое) ────────
+
+  Future<AdminStats> adminStats() => _guard(() async {
+        Future<int> n(Query<Map<String, dynamic>> q) async =>
+            (await q.count().get()).count ?? 0;
+        final r = await Future.wait([
+          n(_users),
+          n(_users.where('banned', isEqualTo: true)),
+          n(_chats.where('kind', isEqualTo: 'group')),
+          n(_chats.where('kind', isEqualTo: 'channel')),
+          n(_chats.where('kind', isEqualTo: 'direct')),
+          n(_db.collection('reports')),
+        ]);
+        return AdminStats(
+          users: r[0], banned: r[1], groups: r[2], channels: r[3], directs: r[4], reports: r[5]);
+      });
+
+  /// Пользователи: последние зарегистрированные или поиск по юзернейму.
+  Future<List<Profile>> adminUsers(String query) => _guard(() async {
+        final q = query.trim().toLowerCase().replaceAll('@', '');
+        final snap = q.isEmpty
+            ? await _users.orderBy('createdAt', descending: true).limit(100).get()
+            : await _users
+                .where('usernameLower', isGreaterThanOrEqualTo: q)
+                .where('usernameLower', isLessThan: '$q\uf8ff')
+                .limit(50)
+                .get();
+        return snap.docs.map(_profileFrom).toList();
+      });
+
+  Future<void> adminSetVerified(String userId, bool value) =>
+      _guard(() => _users.doc(userId).update({'verified': value}));
+
+  Future<void> adminSetBanned(String userId, bool value) =>
+      _guard(() => _users.doc(userId).update({'banned': value}));
+
+  /// Все группы и каналы (личные переписки модератор не просматривает).
+  Future<List<AdminChat>> adminChats() => _guard(() async {
+        final snap = await _chats.where('kind', whereIn: ['group', 'channel']).limit(200).get();
+        final list = snap.docs.map((d) {
+          final m = d.data();
+          return AdminChat(
+            id: d.id,
+            title: m['title'] as String? ?? d.id,
+            channel: m['kind'] == 'channel',
+            members: (m['members'] as List?)?.length ?? 0,
+            verified: m['verified'] as bool? ?? false,
+            createdBy: m['createdBy'] as String? ?? '',
+          );
+        }).toList()
+          ..sort((a, b) => b.members.compareTo(a.members));
+        return list;
+      });
+
+  Future<void> adminSetChatVerified(String chatId, bool value) =>
+      _guard(() => _chats.doc(chatId).update({'verified': value}));
+
+  Future<void> adminRenameChat(String chatId, String title) =>
+      _guard(() => _chats.doc(chatId).update({'title': title}));
+
+  /// Удаляет чат вместе с сообщениями.
+  Future<void> adminDeleteChat(String chatId) => _guard(() async {
+        final msgs = _chats.doc(chatId).collection('messages');
+        while (true) {
+          final page = await msgs.limit(400).get();
+          if (page.docs.isEmpty) break;
+          final b = _db.batch();
+          for (final d in page.docs) {
+            b.delete(d.reference);
+          }
+          await b.commit();
+        }
+        await _chats.doc(chatId).delete();
+      });
+
+  Future<List<Report>> adminReports() => _guard(() async {
+        final snap = await _db
+            .collection('reports')
+            .orderBy('createdAt', descending: true)
+            .limit(100)
+            .get();
+        return snap.docs.map((d) {
+          final m = d.data();
+          return Report(
+            id: d.id,
+            reporterId: m['reporterId'] as String? ?? '',
+            chatId: m['chatId'] as String? ?? '',
+            messageId: m['messageId'] as String?,
+            targetId: m['targetId'] as String?,
+            text: m['text'] as String? ?? '',
+            createdAt: (m['createdAt'] as Timestamp?)?.toDate(),
+          );
+        }).toList();
+      });
+
+  Future<void> adminCloseReport(String reportId) =>
+      _guard(() => _db.collection('reports').doc(reportId).delete());
+
+  /// Жалоба на сообщение — её увидят модераторы в админке.
+  Future<void> report(Message m) => _guard(() => _db.collection('reports').add({
+        'reporterId': _uid,
+        'chatId': m.chatId,
+        'messageId': m.id,
+        'targetId': m.senderId,
+        'text': m.text.length > 500 ? m.text.substring(0, 500) : m.text,
+        'createdAt': FieldValue.serverTimestamp(),
+      }));
+
+  Future<Profile?> profileById(String id) async =>
+      id.isEmpty ? null : (await _loadProfiles([id])).firstOrNull;
 
   @override
   void dispose() {
