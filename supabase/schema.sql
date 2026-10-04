@@ -200,12 +200,13 @@ begin
 end $$;
 
 -- Список чатов текущего пользователя со всем, что нужно экрану «Чаты».
+drop function if exists public.my_chats();
 create or replace function public.my_chats()
 returns table (
   id uuid, kind text, title text, handle text, avatar_url text, avatar_emoji text,
   verified boolean, last_message text, last_sender_name text, last_from_me boolean,
   last_read boolean, last_at timestamptz, unread bigint, pinned boolean, muted boolean,
-  archived boolean, member_count bigint, peer_id uuid
+  archived boolean, member_count bigint, peer_id uuid, can_post boolean
 ) language sql stable security definer set search_path = public as $$
   select
     c.id, c.kind,
@@ -224,7 +225,8 @@ returns table (
       where x.chat_id = c.id and x.created_at > me.last_read_at and x.sender_id <> auth.uid()),
     me.pinned, me.muted, me.archived,
     (select count(*) from chat_members y where y.chat_id = c.id),
-    p.id
+    p.id,
+    c.kind <> 'channel' or me.role in ('owner', 'admin')
   from chat_members me
   join chats c on c.id = me.chat_id
   left join lateral (
@@ -263,3 +265,8 @@ drop policy if exists "avatar update own folder" on storage.objects;
 create policy "avatar update own folder" on storage.objects
   for update to authenticated
   using (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- ─── Галочки ────────────────────────────────────────────────────────────────
+-- Выдаёт галочку аккаунту MilkDev. Зарегистрируйте его в приложении, затем
+-- выполните этот запрос ещё раз (или повторно весь файл — он идемпотентен).
+update public.profiles set verified = true where lower(username) = 'milkdev';

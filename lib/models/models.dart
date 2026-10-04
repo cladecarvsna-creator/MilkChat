@@ -42,6 +42,7 @@ class Profile {
     String? displayName,
     String? bio,
     Uint8List? avatarBytes,
+    bool? verified,
   }) =>
       Profile(
         id: id,
@@ -49,11 +50,19 @@ class Profile {
         displayName: displayName ?? this.displayName,
         bio: bio ?? this.bio,
         avatarUrl: avatarUrl,
-        verified: verified,
+        verified: verified ?? this.verified,
         lastSeen: lastSeen,
         avatarBytes: avatarBytes ?? this.avatarBytes,
       );
 }
+
+/// Аккаунты команды MilkChat, которым в демо-режиме выдаётся галочка.
+/// На сервере галочку ставит администратор (см. конец supabase/schema.sql),
+/// иначе её получил бы любой, кто первым займёт такой юзернейм.
+const officialUsernames = {'milkdev', 'milkchat'};
+
+bool isOfficialUsername(String username) =>
+    officialUsernames.contains(username.toLowerCase());
 
 enum ChatKind { direct, group, channel, saved }
 
@@ -94,6 +103,7 @@ class ChatSummary {
     this.archived = false,
     this.memberCount = 0,
     this.peerId,
+    this.canPost = true,
   });
 
   final String id;
@@ -114,6 +124,9 @@ class ChatSummary {
   final bool archived;
   final int memberCount;
   final String? peerId;
+
+  /// Можно ли мне писать сюда (в каналах — только администраторам).
+  final bool canPost;
 
   factory ChatSummary.fromMap(Map<String, dynamic> m) => ChatSummary(
         id: m['id'] as String,
@@ -136,6 +149,7 @@ class ChatSummary {
         archived: (m['archived'] as bool?) ?? false,
         memberCount: (m['member_count'] as num?)?.toInt() ?? 0,
         peerId: m['peer_id'] as String?,
+        canPost: (m['can_post'] as bool?) ?? true,
       );
 
   ChatSummary copyWith({
@@ -169,6 +183,7 @@ class ChatSummary {
         archived: archived ?? this.archived,
         memberCount: memberCount ?? this.memberCount,
         peerId: peerId,
+        canPost: canPost,
       );
 }
 

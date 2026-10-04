@@ -10,7 +10,12 @@ import '../widgets/common.dart';
 import 'chat_info_screen.dart';
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, required this.chatId, this.embedded = false, this.onClose});
+  const ChatScreen({
+    super.key,
+    required this.chatId,
+    this.embedded = false,
+    this.onClose,
+  });
 
   final String chatId;
 
@@ -56,9 +61,8 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       if (!mounted) return;
       _input.text = text;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не отправлено: $e')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Не отправлено: $e')));
     }
   }
 
@@ -70,9 +74,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (last.senderId != _repo.me?.id) _repo.markRead([widget.chatId]);
   }
 
-  void _openInfo() => Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => ChatInfoScreen(chatId: widget.chatId),
-      ));
+  void _openInfo() => Navigator.of(context).push(
+    MaterialPageRoute(builder: (_) => ChatInfoScreen(chatId: widget.chatId)),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -81,50 +85,86 @@ class _ChatScreenState extends State<ChatScreen> {
       body: ChatBackground(
         icons: theme.patternIcons,
         shapes: theme.floatingShapes,
-        child: Column(
-          children: [
-            StreamBuilder<List<ChatSummary>>(
-              stream: _chats,
-              builder: (context, snap) {
-                final chat = snap.data?.where((c) => c.id == widget.chatId).firstOrNull;
-                return _Header(
+        child: StreamBuilder<List<ChatSummary>>(
+          stream: _chats,
+          builder: (context, chatSnap) {
+            final chat = chatSnap.data
+                ?.where((c) => c.id == widget.chatId)
+                .firstOrNull;
+            return Column(
+              children: [
+                _Header(
                   chat: chat,
                   embedded: widget.embedded,
-                  onBack: widget.embedded ? widget.onClose : () => Navigator.of(context).pop(),
+                  onBack: widget.embedded
+                      ? widget.onClose
+                      : () => Navigator.of(context).pop(),
                   onInfo: _openInfo,
                   onToggleMute: chat == null
                       ? null
                       : () => _repo.setMuted([chat.id], !chat.muted),
-                );
-              },
-            ),
-            Expanded(
-              child: StreamBuilder<List<Message>>(
-                stream: _messages,
-                builder: (context, snap) {
-                  if (snap.hasError) {
-                    return Center(child: Text('Ошибка: ${snap.error}'));
-                  }
-                  if (!snap.hasData) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  final msgs = snap.data!;
-                  WidgetsBinding.instance.addPostFrameCallback((_) => _maybeMarkRead(msgs));
-                  if (msgs.isEmpty) {
-                    return Center(
-                      child: _Pill(text: 'Здесь пока пусто. Напишите первое сообщение!'),
-                    );
-                  }
-                  return _MessageList(messages: msgs, myId: _repo.me!.id);
-                },
-              ),
-            ),
-            _Composer(
-              controller: _input,
-              focus: _focus,
-              onSend: _send,
-            ),
-          ],
+                ),
+                Expanded(
+                  child: StreamBuilder<List<Message>>(
+                    stream: _messages,
+                    builder: (context, snap) {
+                      if (snap.hasError) {
+                        return Center(child: Text('Ошибка: ${snap.error}'));
+                      }
+                      if (!snap.hasData) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+                      final msgs = snap.data!;
+                      WidgetsBinding.instance.addPostFrameCallback(
+                        (_) => _maybeMarkRead(msgs),
+                      );
+                      if (msgs.isEmpty) {
+                        return Center(
+                          child: _Pill(
+                            text:
+                                'Здесь пока пусто. Напишите первое сообщение!',
+                          ),
+                        );
+                      }
+                      return _MessageList(messages: msgs, myId: _repo.me!.id);
+                    },
+                  ),
+                ),
+                if (chat == null || chat.canPost)
+                  _Composer(controller: _input, focus: _focus, onSend: _send)
+                else
+                  const _ReadOnlyBar(),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// Вместо поля ввода в канале, где писать могут только администраторы.
+class _ReadOnlyBar extends StatelessWidget {
+  const _ReadOnlyBar();
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.all(22),
+          child: Text(
+            'Писать в этот канал могут только администраторы',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: p.muted, fontSize: 15),
+          ),
         ),
       ),
     );
@@ -153,8 +193,18 @@ class _Header extends StatelessWidget {
     final subtitle = c == null
         ? ''
         : switch (c.kind) {
-            ChatKind.group => plural(c.memberCount, 'участник', 'участника', 'участников'),
-            ChatKind.channel => plural(c.memberCount, 'подписчик', 'подписчика', 'подписчиков'),
+            ChatKind.group => plural(
+              c.memberCount,
+              'участник',
+              'участника',
+              'участников',
+            ),
+            ChatKind.channel => plural(
+              c.memberCount,
+              'подписчик',
+              'подписчика',
+              'подписчиков',
+            ),
             ChatKind.saved => 'Заметки для себя',
             ChatKind.direct => c.handle ?? '',
           };
@@ -195,9 +245,10 @@ class _Header extends StatelessWidget {
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
-                                        color: p.text,
-                                        fontSize: 19,
-                                        fontWeight: FontWeight.w700),
+                                      color: p.text,
+                                      fontSize: 19,
+                                      fontWeight: FontWeight.w700,
+                                    ),
                                   ),
                                 ),
                                 if (c?.verified ?? false) ...[
@@ -206,10 +257,12 @@ class _Header extends StatelessWidget {
                                 ],
                               ],
                             ),
-                            Text(subtitle,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(color: p.muted, fontSize: 14)),
+                            Text(
+                              subtitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(color: p.muted, fontSize: 14),
+                            ),
                           ],
                         ),
                       ),
@@ -220,7 +273,9 @@ class _Header extends StatelessWidget {
               PopupMenuButton<String>(
                 tooltip: 'Ещё',
                 color: p.surfaceHigh,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20),
+                ),
                 onSelected: (v) {
                   if (v == 'info') onInfo();
                   if (v == 'mute') onToggleMute?.call();
@@ -229,11 +284,16 @@ class _Header extends StatelessWidget {
                   const PopupMenuItem(value: 'info', child: Text('Информация')),
                   PopupMenuItem(
                     value: 'mute',
-                    child: Text((c?.muted ?? false) ? 'Включить звук' : 'Без звука'),
+                    child: Text(
+                      (c?.muted ?? false) ? 'Включить звук' : 'Без звука',
+                    ),
                   ),
                 ],
                 child: IgnorePointer(
-                  child: RoundButton(icon: Icons.more_vert_rounded, onPressed: () {}),
+                  child: RoundButton(
+                    icon: Icons.more_vert_rounded,
+                    onPressed: () {},
+                  ),
                 ),
               ),
             ],
@@ -259,22 +319,27 @@ class _MessageList extends StatelessWidget {
       final prev = i > 0 ? messages[i - 1] : null;
       final next = i < messages.length - 1 ? messages[i + 1] : null;
       final mine = m.senderId == myId;
-      final groupedWithNext = next != null &&
+      final groupedWithNext =
+          next != null &&
           next.senderId == m.senderId &&
           sameDay(next.createdAt, m.createdAt);
-      items.add(_Bubble(
-        message: m,
-        mine: mine,
-        showAvatar: !mine && !groupedWithNext,
-        tail: !groupedWithNext,
-      ));
+      items.add(
+        _Bubble(
+          message: m,
+          mine: mine,
+          showAvatar: !mine && !groupedWithNext,
+          tail: !groupedWithNext,
+        ),
+      );
       if (prev == null || !sameDay(prev.createdAt, m.createdAt)) {
-        items.add(Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 10),
-            child: _Pill(text: dayLabel(m.createdAt)),
+        items.add(
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: _Pill(text: dayLabel(m.createdAt)),
+            ),
           ),
-        ));
+        );
       }
     }
     return Align(
@@ -304,7 +369,10 @@ class _Pill extends StatelessWidget {
         color: p.surface.withValues(alpha: 0.85),
         borderRadius: BorderRadius.circular(18),
       ),
-      child: Text(text, style: TextStyle(color: p.text.withValues(alpha: 0.8), fontSize: 14)),
+      child: Text(
+        text,
+        style: TextStyle(color: p.text.withValues(alpha: 0.8), fontSize: 14),
+      ),
     );
   }
 }
@@ -327,7 +395,8 @@ class _Bubble extends StatelessWidget {
     final p = context.palette;
     final bg = mine ? p.bubbleOut : p.bubbleIn;
     final fg = mine ? p.onBubbleOut : p.onBubbleIn;
-    final isCommand = message.text.startsWith('/') && !message.text.contains(' ');
+    final isCommand =
+        message.text.startsWith('/') && !message.text.contains(' ');
     const r = Radius.circular(22);
     const small = Radius.circular(8);
 
@@ -335,11 +404,16 @@ class _Bubble extends StatelessWidget {
       onLongPress: () {
         Clipboard.setData(ClipboardData(text: message.text));
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Текст скопирован'), duration: Duration(seconds: 1)),
+          const SnackBar(
+            content: Text('Текст скопирован'),
+            duration: Duration(seconds: 1),
+          ),
         );
       },
       child: Container(
-        constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.72),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.sizeOf(context).width * 0.72,
+        ),
         padding: const EdgeInsets.fromLTRB(14, 10, 12, 10),
         decoration: BoxDecoration(
           color: bg,
@@ -368,12 +442,22 @@ class _Bubble extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(hhmm(message.createdAt),
-                      style: TextStyle(color: fg.withValues(alpha: 0.65), fontSize: 12)),
+                  Text(
+                    hhmm(message.createdAt),
+                    style: TextStyle(
+                      color: fg.withValues(alpha: 0.65),
+                      fontSize: 12,
+                    ),
+                  ),
                   if (mine) ...[
                     const SizedBox(width: 4),
-                    Icon(message.read ? Icons.done_all_rounded : Icons.check_rounded,
-                        size: 15, color: fg.withValues(alpha: 0.75)),
+                    Icon(
+                      message.read
+                          ? Icons.done_all_rounded
+                          : Icons.check_rounded,
+                      size: 15,
+                      color: fg.withValues(alpha: 0.75),
+                    ),
                   ],
                 ],
               ),
@@ -414,7 +498,11 @@ class _Bubble extends StatelessWidget {
 }
 
 class _Composer extends StatelessWidget {
-  const _Composer({required this.controller, required this.focus, required this.onSend});
+  const _Composer({
+    required this.controller,
+    required this.focus,
+    required this.onSend,
+  });
 
   final TextEditingController controller;
   final FocusNode focus;
@@ -425,8 +513,10 @@ class _Composer extends StatelessWidget {
     final p = context.palette;
     final hasText = controller.text.trim().isNotEmpty;
     void soon() => ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Вложения и голосовые появятся в следующей версии')),
-        );
+      const SnackBar(
+        content: Text('Вложения и голосовые появятся в следующей версии'),
+      ),
+    );
 
     return Container(
       decoration: BoxDecoration(
@@ -440,7 +530,11 @@ class _Composer extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              RoundButton(icon: Icons.add_rounded, tooltip: 'Вложение', onPressed: soon),
+              RoundButton(
+                icon: Icons.add_rounded,
+                tooltip: 'Вложение',
+                onPressed: soon,
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: CallbackShortcuts(
@@ -457,18 +551,25 @@ class _Composer extends StatelessWidget {
                     decoration: InputDecoration(
                       hintText: 'Сообщение',
                       hintStyle: TextStyle(color: p.muted, fontSize: 17),
-                      contentPadding:
-                          const EdgeInsets.symmetric(horizontal: 22, vertical: 17),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 22,
+                        vertical: 17,
+                      ),
                     ),
                   ),
                 ),
               ),
               const SizedBox(width: 8),
-              RoundButton(icon: Icons.emoji_emotions_outlined, tooltip: 'Стикеры', onPressed: soon),
+              RoundButton(
+                icon: Icons.emoji_emotions_outlined,
+                tooltip: 'Стикеры',
+                onPressed: soon,
+              ),
               const SizedBox(width: 8),
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 160),
-                transitionBuilder: (c, a) => ScaleTransition(scale: a, child: c),
+                transitionBuilder: (c, a) =>
+                    ScaleTransition(scale: a, child: c),
                 child: hasText
                     ? RoundButton(
                         key: const ValueKey('send'),
