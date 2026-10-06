@@ -1,6 +1,6 @@
 import { initializeTestEnvironment, assertSucceeds, assertFails } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'fs';
-import { doc, setDoc, getDoc, updateDoc, collection, addDoc, query, where, getDocs, deleteDoc, serverTimestamp, arrayUnion, increment, writeBatch } from 'firebase/firestore';
+import { doc, setDoc, getDoc, updateDoc, collection, addDoc, query, where, getDocs, deleteDoc, serverTimestamp, arrayUnion, increment, writeBatch, deleteField, arrayRemove, documentId } from 'firebase/firestore';
 const env = await initializeTestEnvironment({ projectId: 'milkchat-915d4', firestore: { rules: readFileSync('firestore.rules','utf8'), host: '127.0.0.1', port: 8085 } });
 const A = env.authenticatedContext('alice').firestore();
 const B = env.authenticatedContext('bob').firestore();
@@ -67,5 +67,43 @@ await t('staff deletes chat', assertSucceeds(deleteDoc(doc(S,'chats/ch1'))));
 await env.withSecurityRulesDisabled(async c => { await setDoc(doc(c.firestore(),'chats/g1'), { kind:'group', title:'G', members:['alice','carol'], admins:['alice'], createdBy:'alice' }); });
 await t('banned sends message denied', assertFails(addDoc(collection(C,'chats/g1/messages'), { senderId:'carol', text:'x', createdAt: serverTimestamp() })));
 await t('member sends message', assertSucceeds(addDoc(collection(A,'chats/g1/messages'), { senderId:'alice', text:'x', createdAt: serverTimestamp() })));
+
+// ─── Ответ и пересылка ────────────────────────────────────────────────────
+await t('reply message', assertSucceeds(addDoc(collection(A,'chats/g1/messages'), { senderId:'alice', text:'re', createdAt: serverTimestamp(), replyTo: { id:'m1', senderName:'carol', text:'x' } })));
+await t('forward message', assertSucceeds(addDoc(collection(A,'chats/g1/messages'), { senderId:'alice', text:'fw', createdAt: serverTimestamp(), forwardedFrom: 'Bob' })));
+await t('bad replyTo denied', assertFails(addDoc(collection(A,'chats/g1/messages'), { senderId:'alice', text:'re', createdAt: serverTimestamp(), replyTo: 'x' })));
+await t('member clears lastMessage after delete', assertSucceeds(updateDoc(doc(A,'chats/g1'), { lastMessage: deleteField() })));
+
+// ─── Юзы каналов и админы ─────────────────────────────────────────────────
+const D = env.authenticatedContext('dave').firestore();
+await t('create channel ch3', assertSucceeds(setDoc(doc(A,'chats/ch3'), { kind:'channel', title:'News', members:['alice','bob'], admins:['alice'], createdBy:'alice' })));
+await t('create channel with handle denied', assertFails(setDoc(doc(A,'chats/ch4'), { kind:'channel', title:'X', members:['alice'], admins:['alice'], createdBy:'alice', handle:'x' })));
+const setHandle = (db, chat, h) => { const b = writeBatch(db); b.set(doc(db,`usernames/${h.toLowerCase()}`), { chatId: chat }); b.update(doc(db,`chats/${chat}`), { handle: h, handleLower: h.toLowerCase() }); return b.commit(); };
+await t('outsider reads private channel denied', assertFails(getDoc(doc(D,'chats/ch3'))));
+await t('subscriber sets handle denied', assertFails(setHandle(B,'ch3','news')));
+await t('handle taken by user denied', assertFails(setHandle(A,'ch3','alice')));
+await t('handle without usernames doc denied', assertFails(updateDoc(doc(A,'chats/ch3'), { handle:'news', handleLower:'news' })));
+await t('admin sets handle', assertSucceeds(setHandle(A,'ch3','News')));
+await t('bob claims channel handle for self denied', assertFails(setDoc(doc(B,'usernames/news2'), { chatId:'ch3' })));
+await t('search usernames', assertSucceeds(getDocs(query(collection(D,'usernames'), where(documentId(),'>=','new'), where(documentId(),'<','new')))));
+await t('outsider reads public channel', assertSucceeds(getDoc(doc(D,'chats/ch3'))));
+await t('admin posts in ch3', assertSucceeds(sendBatch(A,'ch3','alice')));
+await t('outsider reads public messages', assertSucceeds(getDocs(collection(D,'chats/ch3/messages'))));
+await t('outsider posts in public channel denied', assertFails(addDoc(collection(D,'chats/ch3/messages'), { senderId:'dave', text:'x', createdAt: serverTimestamp() })));
+await t('outsider reads private group msgs denied', assertFails(getDocs(collection(D,'chats/g1/messages'))));
+await t('dave subscribes', assertSucceeds(updateDoc(doc(D,'chats/ch3'), { members: arrayUnion('dave') })));
+await t('admin makes bob admin', assertSucceeds(updateDoc(doc(A,'chats/ch3'), { admins: arrayUnion('bob') })));
+await t('admin makes non-member admin denied', assertFails(updateDoc(doc(A,'chats/ch3'), { admins: arrayUnion('zed') })));
+await t('new admin posts', assertSucceeds(sendBatch(B,'ch3','bob')));
+await t('new admin removes creator denied', assertFails(updateDoc(doc(B,'chats/ch3'), { admins: arrayRemove('alice') })));
+await t('new admin makes dave admin', assertSucceeds(updateDoc(doc(B,'chats/ch3'), { admins: arrayUnion('dave') })));
+await t('creator removes dave admin', assertSucceeds(updateDoc(doc(A,'chats/ch3'), { admins: arrayRemove('dave') })));
+const renameHandle = (db) => { const b = writeBatch(db); b.set(doc(db,'usernames/news_ru'), { chatId:'ch3' }); b.delete(doc(db,'usernames/news')); b.update(doc(db,'chats/ch3'), { handle:'news_ru', handleLower:'news_ru' }); return b.commit(); };
+await t('subscriber deletes channel handle denied', assertFails(deleteDoc(doc(D,'usernames/news'))));
+await t('admin renames handle', assertSucceeds(renameHandle(B)));
+const dropHandle = (db) => { const b = writeBatch(db); b.delete(doc(db,'usernames/news_ru')); b.update(doc(db,'chats/ch3'), { handle: deleteField(), handleLower: deleteField() }); return b.commit(); };
+await t('admin makes channel private', assertSucceeds(dropHandle(A)));
+await t('handle freed', assertSucceeds(setDoc(doc(C,'usernames/news_ru'), { uid:'carol' })));
+await t('user claims with extra field denied', assertFails(setDoc(doc(D,'usernames/dave'), { uid:'dave', chatId:'ch3' })));
 console.log(`\n${ok} passed, ${bad} failed`);
 await env.cleanup(); process.exit(bad ? 1 : 0);

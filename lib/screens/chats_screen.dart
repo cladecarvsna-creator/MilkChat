@@ -27,6 +27,9 @@ class _ChatsScreenState extends State<ChatsScreen> {
   final Set<String> _selected = {};
   bool _showArchive = false;
   List<Profile> _people = [];
+
+  /// Публичные каналы из поиска, на которые я ещё не подписан.
+  List<ChatSummary> _channels = [];
   Timer? _debounce;
 
   @override
@@ -46,12 +49,24 @@ class _ChatsScreenState extends State<ChatsScreen> {
     setState(() {});
     _debounce?.cancel();
     if (q.trim().length < 2) {
-      setState(() => _people = []);
+      setState(() {
+        _people = [];
+        _channels = [];
+      });
       return;
     }
     _debounce = Timer(const Duration(milliseconds: 300), () async {
-      final res = await context.read<ChatRepository>().searchUsers(q.trim());
-      if (mounted && _search.text.trim() == q.trim()) setState(() => _people = res);
+      final repo = context.read<ChatRepository>();
+      final res = await Future.wait([
+        repo.searchUsers(q.trim()),
+        repo.searchChannels(q.trim()).catchError((_) => <ChatSummary>[]),
+      ]);
+      if (mounted && _search.text.trim() == q.trim()) {
+        setState(() {
+          _people = res[0] as List<Profile>;
+          _channels = res[1] as List<ChatSummary>;
+        });
+      }
     });
   }
 
@@ -105,6 +120,8 @@ class _ChatsScreenState extends State<ChatsScreen> {
       builder: (context, snap) {
         final all = snap.data ?? const <ChatSummary>[];
         final chats = _visible(all);
+        final mineIds = {for (final c in all) c.id};
+        final channels = _channels.where((c) => !mineIds.contains(c.id)).toList();
         final archivedCount = all.where((c) => c.archived).length;
         final byId = {for (final c in all) c.id: c};
         final selectedChats = _selected.map((id) => byId[id]).whereType<ChatSummary>();
@@ -175,7 +192,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
                       ),
                     ),
                   SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 110),
+                    padding: EdgeInsets.fromLTRB(16, 0, 16, channels.isEmpty ? 110 : 0),
                     sliver: SliverList.builder(
                       itemCount: chats.length + (_people.isEmpty ? 0 : _people.length + 1),
                       itemBuilder: (context, i) {
@@ -231,7 +248,57 @@ class _ChatsScreenState extends State<ChatsScreen> {
                       },
                     ),
                   ),
-                  if (snap.hasData && chats.isEmpty && _people.isEmpty)
+                  if (channels.isNotEmpty)
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 110),
+                      sliver: SliverList.list(children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(8, 12, 8, 8),
+                          child: Text('Каналы',
+                              style: TextStyle(
+                                  color: p.title, fontWeight: FontWeight.w800, fontSize: 18)),
+                        ),
+                        for (final c in channels)
+                          TileCard(
+                            onTap: () {
+                              _search.clear();
+                              _onSearch('');
+                              HomeShell.openChat(context, c.id);
+                            },
+                            child: Row(
+                              children: [
+                                Avatar.chat(c, size: 48),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(children: [
+                                        Flexible(
+                                          child: Text(c.title,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                  color: p.title, fontWeight: FontWeight.w700)),
+                                        ),
+                                        if (c.verified) ...[
+                                          const SizedBox(width: 6),
+                                          const VerifiedBadge(),
+                                        ],
+                                      ]),
+                                      Text(
+                                        '${c.handle ?? ''} · ${plural(c.memberCount, 'подписчик', 'подписчика', 'подписчиков')}',
+                                        style: TextStyle(color: p.muted),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ]),
+                    ),
+                  if (snap.hasData && chats.isEmpty && _people.isEmpty && channels.isEmpty)
                     SliverToBoxAdapter(
                       child: Padding(
                         padding: const EdgeInsets.all(32),

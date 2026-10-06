@@ -22,6 +22,9 @@ class DefaultFirebaseOptions {
   static const _bucket = 'milkchat-915d4.firebasestorage.app';
   static const _sender = '548648083112';
   static const _webAppId = '1:548648083112:web:5b919821f711fd558fec9d';
+  // Пустая строка, если при сборке не передали (в CI — переменные репозитория).
+  static const _androidAppId = String.fromEnvironment('FIREBASE_ANDROID_APP_ID');
+  static const _appleAppId = String.fromEnvironment('FIREBASE_APPLE_APP_ID');
 
   static const web = FirebaseOptions(
     apiKey: _apiKey,
@@ -38,7 +41,7 @@ class DefaultFirebaseOptions {
     projectId: _projectId,
     storageBucket: _bucket,
     messagingSenderId: _sender,
-    appId: String.fromEnvironment('FIREBASE_ANDROID_APP_ID', defaultValue: _webAppId),
+    appId: _androidAppId == '' ? _webAppId : _androidAppId,
   );
 
   static const apple = FirebaseOptions(
@@ -46,7 +49,7 @@ class DefaultFirebaseOptions {
     projectId: _projectId,
     storageBucket: _bucket,
     messagingSenderId: _sender,
-    appId: String.fromEnvironment('FIREBASE_APPLE_APP_ID', defaultValue: _webAppId),
+    appId: _appleAppId == '' ? _webAppId : _appleAppId,
     iosBundleId: 'com.milkchat.milkchat',
   );
 }

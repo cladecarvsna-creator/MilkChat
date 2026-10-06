@@ -14,7 +14,8 @@
 
 - Регистрация и вход по почте с подтверждением адреса, сброс пароля, вход через Google.
 - Личные чаты, группы и каналы — создаёт сам пользователь. Официальный канал MilkChat.
-- Сообщения в реальном времени, отметки о прочтении, редактирование и удаление по правам.
+- Сообщения в реальном времени, отметки о прочтении; ответ, пересылка, редактирование и удаление у всех.
+- Публичные каналы с юзом (@имя): поиск, подписка, назначение администраторов.
 - Выделение чатов: закрепить, прочитать, без звука, в архив, удалить.
 - Профиль с аватаркой (Firebase Storage), настройки и лист «Оформление».
 
@@ -29,6 +30,17 @@
 
 Структура Firestore: `users`, `usernames`, `user_settings/{uid}/chats`, `chats` (личные, группы,
 каналы) с подколлекцией `messages`, `reports`.
+
+## Вход через Google на Android и компьютере
+
+| Платформа | Как работает | Что нужно настроить |
+|---|---|---|
+| Веб | всплывающее окно Firebase | ничего |
+| Android | `signInWithProvider` (Custom Tabs) | постоянный ключ подписи: секреты `ANDROID_KEYSTORE_BASE64` и `ANDROID_KEYSTORE_PASSWORD`; его SHA-1 и SHA-256 — в Android-приложении Firebase (пакет `com.milkchat.milkchat`) |
+| Windows, macOS | браузер → ответ на `127.0.0.1` (PKCE) → `signInWithCredential` | OAuth-клиент Google типа «Desktop app» в проекте milkchat-915d4: секреты `GOOGLE_DESKTOP_CLIENT_ID` и `GOOGLE_DESKTOP_CLIENT_SECRET` |
+| Linux | — | Firebase SDK для Linux не существует |
+
+SHA-1 подписи каждой Android-сборки выводится в Summary задачи `android` workflow «Build apps».
 
 ## Сборка и выкладка на REG.RU
 

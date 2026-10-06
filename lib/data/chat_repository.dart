@@ -47,10 +47,38 @@ abstract class ChatRepository extends ChangeNotifier {
 
   Stream<List<ChatSummary>> watchChats();
   Stream<List<Message>> watchMessages(String chatId);
-  Future<void> sendMessage(String chatId, String text);
+  Future<void> sendMessage(
+    String chatId,
+    String text, {
+    MessageRef? replyTo,
+    String? forwardedFrom,
+  });
+
+  /// Удаление для всех: своё сообщение — автор, любое — админ (проверяют правила).
+  Future<void> deleteMessage(String chatId, String messageId) =>
+      Future.error(UnsupportedError('Удаление здесь недоступно'));
 
   Future<ChatDetails> chatDetails(String chatId);
   Future<List<Profile>> searchUsers(String query);
+
+  /// Публичные каналы по юзу (@имя).
+  Future<List<ChatSummary>> searchChannels(String query) async => const [];
+
+  /// Подписаться на канал.
+  Future<void> joinChannel(String chatId) =>
+      Future.error(UnsupportedError('Подписка здесь недоступна'));
+
+  /// Юз канала: null — сделать канал закрытым.
+  Future<void> setChatHandle(String chatId, String? handle) =>
+      Future.error(UnsupportedError('Юзы здесь недоступны'));
+
+  /// Назначить или снять администратора группы или канала.
+  Future<void> setAdmin(String chatId, String userId, bool value) =>
+      Future.error(UnsupportedError('Админы здесь недоступны'));
+
+  /// Убрать участника (админ).
+  Future<void> removeMember(String chatId, String userId) =>
+      Future.error(UnsupportedError('Здесь недоступно'));
   Future<List<Profile>> contacts();
 
   /// Возвращает id существующего или нового личного чата.
