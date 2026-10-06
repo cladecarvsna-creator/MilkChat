@@ -32,7 +32,26 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: flutter build apk --release
+      # Постоянный ключ подписи из секретов (иначе SHA-1 меняется и Google-вход не работает).
+      - name: Ключ подписи
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/milkchat.jks"
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/milkchat.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Секрет ANDROID_KEYSTORE_BASE64 не задан — APK подписан временным ключом, вход через Google работать не будет"
+          fi
+      - run: flutter build apk --release --dart-define=FIREBASE_ANDROID_APP_ID=${{ vars.FIREBASE_ANDROID_APP_ID }}
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: milkchat
+      - name: SHA-1 подписи (для Firebase)
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+          "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk \
+            | grep -E "SHA-1|SHA-256" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: milkchat-android
@@ -47,7 +66,7 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: flutter build windows --release
+      - run: flutter build windows --release --dart-define=GOOGLE_DESKTOP_CLIENT_ID=${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }} --dart-define=GOOGLE_DESKTOP_CLIENT_SECRET=${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
       - uses: actions/upload-artifact@v4
         with:
           name: milkchat-windows
@@ -63,7 +82,7 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: flutter build linux --release
+      - run: flutter build linux --release --dart-define=GOOGLE_DESKTOP_CLIENT_ID=${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }} --dart-define=GOOGLE_DESKTOP_CLIENT_SECRET=${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
       - uses: actions/upload-artifact@v4
         with:
           name: milkchat-linux
@@ -78,7 +97,7 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: flutter build macos --release
+      - run: flutter build macos --release --dart-define=GOOGLE_DESKTOP_CLIENT_ID=${{ secrets.GOOGLE_DESKTOP_CLIENT_ID }} --dart-define=GOOGLE_DESKTOP_CLIENT_SECRET=${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }} --dart-define=FIREBASE_APPLE_APP_ID=${{ vars.FIREBASE_APPLE_APP_ID }}
       - uses: actions/upload-artifact@v4
         with:
           name: milkchat-macos

@@ -38,11 +38,22 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Уникальные юзернеймы: {uid}. Занять можно только свободный и только на себя.
+    // Уникальные юзы: {uid} у людей или {chatId} у каналов — одно пространство имён.
+    // Занять можно только свободный: на себя или на канал, где ты админ.
     match /usernames/{name} {
+      function channelAdmin(chatId) {
+        let c = get(/databases/$(database)/documents/chats/$(chatId)).data;
+        return c.kind == 'channel' && uid() in c.admins;
+      }
       allow read: if true;
-      allow create: if signedIn() && request.resource.data.uid == uid();
-      allow delete: if signedIn() && resource.data.uid == uid();
+      allow create: if signedIn() && (
+        (request.resource.data.keys().hasOnly(['uid']) && request.resource.data.uid == uid())
+        || (request.resource.data.keys().hasOnly(['chatId'])
+            && name.matches('^[a-z0-9_]{3,32}$')
+            && channelAdmin(request.resource.data.chatId)));
+      allow delete: if signedIn() && (
+        resource.data.get('uid', '') == uid()
+        || (resource.data.get('chatId', '') != '' && channelAdmin(resource.data.chatId)));
       allow update: if false;
     }
 
@@ -61,9 +72,12 @@ service cloud.firestore {
         return changed().hasOnly(['lastMessage', 'lastAt', 'unread', 'readAt']);
       }
 
+      // Канал с юзом публичный: его видит любой вошедший пользователь.
+      function isPublic() { return data().kind == 'channel' && data().get('handle', null) != null; }
+
       // Несуществующий документ можно «прочитать» — так клиент проверяет,
       // есть ли уже личный чат.
-      allow get: if signedIn() && (resource == null || isMember() || isStaff());
+      allow get: if signedIn() && (resource == null || isMember() || isStaff() || isPublic());
       allow list: if isStaff() || (signedIn() && uid() in resource.data.members);
 
       allow create: if signedIn() && notBanned()
@@ -79,17 +93,38 @@ service cloud.firestore {
           // Группа/канал: создатель — единственный админ.
           (request.resource.data.kind in ['group', 'channel']
             && request.resource.data.admins == [uid()]
+            && !('handle' in request.resource.data)
             && chatId != 'milkchat')
         );
+
+      // Юз ставится только вместе с записью usernames/{юз} = {chatId}.
+      function handleValid() {
+        return !changed().hasAny(['handle', 'handleLower'])
+          || (request.resource.data.get('handle', null) == null
+              && request.resource.data.get('handleLower', null) == null)
+          || (data().kind == 'channel'
+              && request.resource.data.handle.matches('^[A-Za-z0-9_]{3,32}$')
+              && request.resource.data.handleLower == request.resource.data.handle.lower()
+              && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.handleLower))
+                   .data.get('chatId', '') == chatId);
+      }
 
       allow update: if
         // Отправка сообщений и отметки о прочтении.
         (isMember() && activityOnly()
           && (data().kind != 'channel' || isAdmin() || changed().hasOnly(['unread', 'readAt'])))
-        // Админ меняет название, описание, участников и админов.
+        // Админ меняет название, описание, юз, участников и админов.
+        // Админы — только из участников; создателя канала другие админы не снимают.
         || (isAdmin() && data().kind != 'direct'
           && changed().hasOnly(['title', 'about', 'avatarUrl', 'members', 'admins',
-                                'lastMessage', 'lastAt', 'unread', 'readAt']))
+                                'handle', 'handleLower',
+                                'lastMessage', 'lastAt', 'unread', 'readAt'])
+          && request.resource.data.members.hasAll(request.resource.data.admins)
+          && request.resource.data.admins.size() > 0
+          && (!(data().get('createdBy', '') in data().admins)
+              || data().createdBy in request.resource.data.admins
+              || uid() == data().createdBy)
+          && handleValid())
         // Подписка на канал: добавить в участники только себя.
         || (signedIn() && data().kind == 'channel'
           && changed().hasOnly(['members'])
@@ -112,14 +147,21 @@ service cloud.firestore {
         function member() { return signedIn() && uid() in chat().members; }
         function admin() { return signedIn() && uid() in chat().admins; }
 
-        allow read: if member() || isStaff();
+        // Сообщения публичного канала читает любой вошедший — как превью до подписки.
+        allow read: if member() || isStaff()
+          || (signedIn() && chat().kind == 'channel' && chat().get('handle', null) != null);
         allow create: if member() && notBanned()
           && (chat().kind != 'channel' || admin())
           && request.resource.data.senderId == uid()
           && request.resource.data.text is string
           && request.resource.data.text.size() > 0
           && request.resource.data.text.size() <= 4096
-          && request.resource.data.createdAt == request.time;
+          && request.resource.data.createdAt == request.time
+          // Ответ и пересылка — необязательные поля.
+          && (!('replyTo' in request.resource.data) || request.resource.data.replyTo is map)
+          && (!('forwardedFrom' in request.resource.data)
+              || (request.resource.data.forwardedFrom is string
+                  && request.resource.data.forwardedFrom.size() <= 100));
         // Редактирует только автор, и только текст.
         allow update: if member() && resource.data.senderId == uid()
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'editedAt'])

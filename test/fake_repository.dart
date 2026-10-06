@@ -148,7 +148,12 @@ class FakeRepository extends ChatRepository {
       _watch(() => List.unmodifiable(_messages[chatId] ?? const <Message>[]));
 
   @override
-  Future<void> sendMessage(String chatId, String text) async {
+  Future<void> sendMessage(
+    String chatId,
+    String text, {
+    MessageRef? replyTo,
+    String? forwardedFrom,
+  }) async {
     final me = _me!;
     final admins = _admins[chatId];
     if (admins != null && !admins.contains(me.id)) {
@@ -161,7 +166,16 @@ class FakeRepository extends ChatRepository {
       senderName: me.displayName,
       text: text,
       createdAt: DateTime.now(),
+      replyTo: replyTo,
+      forwardedFrom: forwardedFrom,
     ));
+    _refreshLast(chatId);
+    _emit();
+  }
+
+  @override
+  Future<void> deleteMessage(String chatId, String messageId) async {
+    _messages[chatId]!.removeWhere((m) => m.id == messageId);
     _refreshLast(chatId);
     _emit();
   }
@@ -170,6 +184,7 @@ class FakeRepository extends ChatRepository {
   Future<ChatDetails> chatDetails(String chatId) async => ChatDetails(
         chat: _chats[chatId]!,
         members: [for (final id in _members[chatId]!) _users[id]!],
+        admins: _admins[chatId] ?? const {},
         about: _about[chatId] ?? '',
       );
 

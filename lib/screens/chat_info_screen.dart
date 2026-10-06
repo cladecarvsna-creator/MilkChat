@@ -10,10 +10,118 @@ import '../widgets/common.dart';
 import 'home_shell.dart';
 
 /// Профиль чата: группа, канал или собеседник.
-class ChatInfoScreen extends StatelessWidget {
+class ChatInfoScreen extends StatefulWidget {
   const ChatInfoScreen({super.key, required this.chatId});
 
   final String chatId;
+
+  @override
+  State<ChatInfoScreen> createState() => _ChatInfoScreenState();
+}
+
+class _ChatInfoScreenState extends State<ChatInfoScreen> {
+  late Future<ChatDetails> _details = context.read<ChatRepository>().chatDetails(widget.chatId);
+
+  void _reload() => setState(() {
+        _details = context.read<ChatRepository>().chatDetails(widget.chatId);
+      });
+
+  /// Выполняет действие, показывает ошибку и перечитывает чат.
+  Future<void> _run(Future<void> Function() action, [String? done]) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await action();
+      if (done != null) messenger.showSnackBar(SnackBar(content: Text(done)));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+    }
+    if (mounted) _reload();
+  }
+
+  Future<void> _editHandle(ChatDetails d) async {
+    final repo = context.read<ChatRepository>();
+    final c = TextEditingController(text: d.chat.handle?.replaceFirst('@', '') ?? '');
+    final value = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Юз канала'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: c,
+              autofocus: true,
+              decoration: const InputDecoration(prefixText: '@', hintText: 'milk_news'),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'По юзу канал можно найти в поиске и подписаться. '
+              'Пустое поле — канал станет закрытым.',
+              style: TextStyle(fontSize: 13),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, c.text.trim()),
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+    if (value == null) return;
+    await _run(() => repo.setChatHandle(d.chat.id, value.isEmpty ? null : value),
+        value.isEmpty ? 'Канал теперь закрытый' : 'Юз сохранён: @$value');
+  }
+
+  /// Действия админа с участником: написать, админ, удалить.
+  Future<void> _memberActions(ChatDetails d, Profile m) async {
+    final repo = context.read<ChatRepository>();
+    final me = repo.me?.id;
+    final channel = d.chat.kind == ChatKind.channel;
+    final amAdmin = d.isAdmin(me);
+    final isAdmin = d.admins.contains(m.id);
+    // Создателя снимает только он сам.
+    final protectedCreator = m.id == d.createdBy && me != d.createdBy;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.chat_bubble_outline_rounded),
+            title: const Text('Написать'),
+            onTap: () => Navigator.pop(ctx, 'dm'),
+          ),
+          if (amAdmin && !protectedCreator)
+            ListTile(
+              leading: Icon(isAdmin ? Icons.remove_moderator_outlined : Icons.add_moderator_outlined),
+              title: Text(isAdmin ? 'Снять администратора' : 'Сделать администратором'),
+              onTap: () => Navigator.pop(ctx, 'admin'),
+            ),
+          if (amAdmin && !protectedCreator)
+            ListTile(
+              leading: const Icon(Icons.person_remove_outlined, color: Color(0xFFFF6B6B)),
+              title: Text(channel ? 'Удалить из канала' : 'Удалить из группы',
+                  style: const TextStyle(color: Color(0xFFFF6B6B))),
+              onTap: () => Navigator.pop(ctx, 'remove'),
+            ),
+        ]),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'dm':
+        final id = await repo.openDirectChat(m.id);
+        if (mounted) HomeShell.openChat(context, id);
+      case 'admin':
+        await _run(() => repo.setAdmin(d.chat.id, m.id, !isAdmin),
+            isAdmin ? '${m.displayName} больше не администратор' : '${m.displayName} теперь администратор');
+      case 'remove':
+        await _run(() => repo.removeMember(d.chat.id, m.id), '${m.displayName} удалён');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -21,7 +129,7 @@ class ChatInfoScreen extends StatelessWidget {
     final repo = context.read<ChatRepository>();
     return Scaffold(
       body: FutureBuilder<ChatDetails>(
-        future: repo.chatDetails(chatId),
+        future: _details,
         builder: (context, snap) {
           if (snap.hasError) return Center(child: Text('Ошибка: ${snap.error}'));
           if (!snap.hasData) return const Center(child: CircularProgressIndicator());
@@ -31,6 +139,7 @@ class ChatInfoScreen extends StatelessWidget {
               ? d.members.where((m) => m.id == c.peerId).firstOrNull
               : null;
           final isGroup = c.kind == ChatKind.group || c.kind == ChatKind.channel;
+          final amAdmin = d.isAdmin(repo.me?.id);
           final countLabel = c.kind == ChatKind.channel
               ? plural(d.members.length, 'подписчик', 'подписчика', 'подписчиков')
               : plural(d.members.length, 'участник', 'участника', 'участников');
@@ -116,6 +225,12 @@ class ChatInfoScreen extends StatelessWidget {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                       children: [
+                        if (!d.isMember)
+                          _Action(
+                            icon: Icons.add_rounded,
+                            label: 'Подписаться',
+                            onTap: () => _run(() => repo.joinChannel(c.id), 'Вы подписались'),
+                          ),
                         _Action(
                           icon: Icons.chat_bubble_rounded,
                           label: 'Открыть',
@@ -149,7 +264,20 @@ class ChatInfoScreen extends StatelessWidget {
                       if (peer.bio.isNotEmpty)
                         _InfoTile(icon: Icons.info_outline, title: 'О себе', value: peer.bio),
                     ] else ...[
-                      _InfoTile(icon: Icons.info_outline, title: 'Тип', value: c.kind.label),
+                      _InfoTile(
+                          icon: Icons.info_outline,
+                          title: 'Тип',
+                          value: c.kind == ChatKind.channel
+                              ? (c.handle == null ? 'Закрытый канал' : 'Публичный канал')
+                              : c.kind.label),
+                      if (c.kind == ChatKind.channel && (amAdmin || c.handle != null))
+                        _InfoTile(
+                          icon: Icons.alternate_email,
+                          title: 'Юз канала',
+                          value: c.handle ?? 'Не задан — нажмите, чтобы канал можно было найти',
+                          trailing: amAdmin ? Icons.edit_outlined : null,
+                          onTap: amAdmin ? () => _editHandle(d) : null,
+                        ),
                       if (d.about.isNotEmpty)
                         _InfoTile(icon: Icons.notes_rounded, title: 'Описание', value: d.about),
                       if (isGroup)
@@ -178,11 +306,7 @@ class ChatInfoScreen extends StatelessWidget {
                           last: i == d.members.length - 1,
                           onTap: d.members[i].id == repo.me?.id
                               ? null
-                              : () async {
-                                  final id = await repo.openDirectChat(d.members[i].id);
-                                  if (!context.mounted) return;
-                                  HomeShell.openChat(context, id);
-                                },
+                              : () => _memberActions(d, d.members[i]),
                           child: Row(
                             children: [
                               Avatar.profile(d.members[i], size: 44),
@@ -203,6 +327,11 @@ class ChatInfoScreen extends StatelessWidget {
                                   ],
                                 ),
                               ),
+                              if (d.admins.contains(d.members[i].id))
+                                Text(
+                                  d.members[i].id == d.createdBy ? 'владелец' : 'админ',
+                                  style: TextStyle(color: p.accent, fontWeight: FontWeight.w700),
+                                ),
                             ],
                           ),
                         ),
@@ -254,19 +383,26 @@ class _Action extends StatelessWidget {
 }
 
 class _InfoTile extends StatelessWidget {
-  const _InfoTile({required this.icon, required this.title, required this.value, this.trailing});
+  const _InfoTile({
+    required this.icon,
+    required this.title,
+    required this.value,
+    this.trailing,
+    this.onTap,
+  });
 
   final IconData icon;
   final String title;
   final String value;
   final IconData? trailing;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
     return TileCard(
       padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 20),
-      onTap: trailing == null ? null : () {},
+      onTap: onTap ?? (trailing == null ? null : () {}),
       child: Row(
         children: [
           Icon(icon, color: p.text.withValues(alpha: 0.75)),
