@@ -21,6 +21,8 @@ jobs:
       - run: flutter analyze
       - run: flutter test
       - run: flutter build web --release --base-href / --dart-define=BUILD=${GITHUB_SHA::7}
+      # Имена файлов кода с номером сборки — иначе браузер берёт старый main.dart.js из кэша.
+      - run: tool/cache_bust.sh build/web ${GITHUB_SHA::7}
       - name: Проверить, что .htaccess попал в сборку
         run: test -f build/web/.htaccess
       - uses: actions/upload-artifact@v4
