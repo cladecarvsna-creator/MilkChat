@@ -8,6 +8,8 @@ import 'package:flutter/foundation.dart';
 
 import '../models/models.dart';
 import 'chat_repository.dart';
+import 'google_desktop_auth_stub.dart'
+    if (dart.library.io) 'google_desktop_auth.dart';
 
 /// Id официального канала MilkChat. Создаётся скриптом tool/admin (Admin SDK).
 const officialChannelId = 'milkchat';
@@ -16,7 +18,7 @@ const officialChannelId = 'milkchat';
 ///
 /// Структура Firestore (правила — firestore.rules):
 ///   users/{uid}                 публичный профиль; verified пишет только Admin SDK
-///   usernames/{lower}           {uid} — уникальность юзернеймов
+///   usernames/{lower}           {uid} или {chatId} — уникальные юзы людей и каналов
 ///   user_settings/{uid}/chats/{chatId}   pinned / muted / archived (только владелец)
 ///   chats/{chatId}              kind: direct | group | channel | saved,
 ///                               members, admins, lastMessage, unread.{uid}, readAt.{uid}
@@ -190,21 +192,27 @@ class FirebaseRepository extends ChatRepository {
         await cred.user!.sendEmailVerification();
       });
 
+  /// Google-вход есть везде, где работает Firebase: веб, Android, iOS,
+  /// Windows и macOS. На Linux Firebase SDK нет, приложение туда не доходит.
   @override
-  bool get supportsGoogle =>
-      kIsWeb ||
-      defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS;
+  bool get supportsGoogle => kIsWeb || defaultTargetPlatform != TargetPlatform.linux;
 
   /// Веб — всплывающее окно Google OAuth; Android/iOS — нативный поток
-  /// `signInWithProvider` из firebase_auth (пакет google_sign_in не нужен).
+  /// `signInWithProvider` из firebase_auth; Windows и macOS — браузер с
+  /// возвратом на 127.0.0.1 (google_desktop_auth.dart), затем токен Google
+  /// меняется на сессию Firebase.
   @override
   Future<void> signInWithGoogle() => _guard(() async {
         final provider = GoogleAuthProvider()..setCustomParameters({'prompt': 'select_account'});
         if (kIsWeb) {
           await _auth.signInWithPopup(provider);
-        } else {
+        } else if (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS) {
           await _auth.signInWithProvider(provider);
+        } else {
+          final t = await googleDesktopSignIn();
+          await _auth.signInWithCredential(
+              GoogleAuthProvider.credential(idToken: t.idToken, accessToken: t.accessToken));
         }
       });
 
@@ -248,6 +256,9 @@ class FirebaseRepository extends ChatRepository {
         'popup-blocked' => 'Браузер заблокировал окно входа Google',
         'unauthorized-domain' => 'Домен не добавлен в Authorized domains Firebase',
         'operation-not-allowed' => 'Этот способ входа выключен в Firebase',
+        'web-context-canceled' || 'canceled' => 'Вход отменён',
+        'app-not-authorized' || 'invalid-cert-hash' =>
+          'Приложение не добавлено в Firebase (нужен SHA-1 ключа подписи)',
         _ => 'Ошибка входа ($code)',
       };
 
@@ -421,7 +432,9 @@ class FirebaseRepository extends ChatRepository {
       title: peer != null
           ? (peer.displayName.isEmpty ? peer.username : peer.displayName)
           : (m['title'] as String? ?? ''),
-      handle: peer != null ? '@${peer.username}' : m['handle'] as String?,
+      handle: peer != null
+          ? '@${peer.username}'
+          : (m['handle'] == null ? null : '@${m['handle']}'),
       avatarUrl: peer?.avatarUrl ?? m['avatarUrl'] as String?,
       verified: peer?.verified ?? (m['verified'] as bool? ?? false),
       lastMessage: last?['text'] as String?,
@@ -436,6 +449,7 @@ class FirebaseRepository extends ChatRepository {
       memberCount: members.length,
       peerId: peerId,
       canPost: kind != ChatKind.channel || admins.contains(_uid),
+      isAdmin: admins.contains(_uid),
     );
   }
 
@@ -461,6 +475,9 @@ class FirebaseRepository extends ChatRepository {
               text: m['text'] as String? ?? '',
               createdAt: at,
               read: !at.isAfter(othersRead),
+              replyTo: MessageRef.fromMap(m['replyTo']),
+              forwardedFrom: m['forwardedFrom'] as String?,
+              edited: m['editedAt'] != null,
             );
           }()
       ]);
@@ -497,7 +514,13 @@ class FirebaseRepository extends ChatRepository {
   }
 
   @override
-  Future<void> sendMessage(String chatId, String text) => _guard(() async {
+  Future<void> sendMessage(
+    String chatId,
+    String text, {
+    MessageRef? replyTo,
+    String? forwardedFrom,
+  }) =>
+      _guard(() async {
         final chatRef = _chats.doc(chatId);
         final chat = await chatRef.get();
         final members = List<String>.from(chat.data()?['members'] as List? ?? const []);
@@ -509,6 +532,8 @@ class FirebaseRepository extends ChatRepository {
           'senderName': name,
           'text': text,
           'createdAt': FieldValue.serverTimestamp(),
+          'replyTo': ?replyTo?.toMap(),
+          'forwardedFrom': ?forwardedFrom,
         });
         batch.update(chatRef, {
           'lastMessage': {'text': text, 'senderId': _uid, 'senderName': name},
@@ -527,9 +552,30 @@ class FirebaseRepository extends ChatRepository {
             'editedAt': FieldValue.serverTimestamp(),
           }));
 
-  /// Удаление: своё сообщение — автор; любое — админ группы или канала (проверяют правила).
-  Future<void> deleteMessage(String chatId, String messageId) =>
-      _guard(() => _chats.doc(chatId).collection('messages').doc(messageId).delete());
+  /// Удаление у всех: своё сообщение — автор; любое — админ группы или канала
+  /// или модератор (проверяют правила). Превью в списке чатов переходит
+  /// на предыдущее сообщение.
+  @override
+  Future<void> deleteMessage(String chatId, String messageId) => _guard(() async {
+        final chatRef = _chats.doc(chatId);
+        await chatRef.collection('messages').doc(messageId).delete();
+        try {
+          final last = await chatRef
+              .collection('messages')
+              .orderBy('createdAt', descending: true)
+              .limit(1)
+              .get();
+          final m = last.docs.firstOrNull?.data();
+          await chatRef.update({
+            'lastMessage': m == null
+                ? FieldValue.delete()
+                : {'text': m['text'], 'senderId': m['senderId'], 'senderName': m['senderName']},
+          });
+        } on FirebaseException catch (e) {
+          // Сообщение уже удалено; превью просто останется прежним.
+          debugPrint('MilkChat: превью не обновлено: $e');
+        }
+      });
 
   @override
   Future<ChatDetails> chatDetails(String chatId) async {
@@ -541,6 +587,9 @@ class FirebaseRepository extends ChatRepository {
       chat: _summary(d, st),
       members: profiles,
       about: d.data()?['about'] as String? ?? '',
+      admins: Set<String>.from(d.data()?['admins'] as List? ?? const []),
+      createdBy: d.data()?['createdBy'] as String?,
+      isMember: members.contains(_uid),
     );
   }
 
@@ -587,13 +636,85 @@ class FirebaseRepository extends ChatRepository {
         return ref.id;
       });
 
+  // ─── Юзы каналов и администраторы ─────────────────────────────────────────
+  //
+  // Юз канала живёт в той же коллекции usernames, что и юзы людей
+  // (usernames/{lower} = {chatId}), поэтому имена не пересекаются.
+  // Канал с юзом публичный: его можно найти, открыть и подписаться.
+
+  static final _handleRe = RegExp(r'^[A-Za-z0-9_]{3,32}$');
+
+  @override
+  Future<List<ChatSummary>> searchChannels(String query) => _guard(() async {
+        final q = query.replaceFirst('@', '').trim().toLowerCase();
+        if (q.length < 2) return <ChatSummary>[];
+        final names = await _db
+            .collection('usernames')
+            .where(FieldPath.documentId, isGreaterThanOrEqualTo: q)
+            .where(FieldPath.documentId, isLessThan: '$q\uf8ff')
+            .limit(30)
+            .get();
+        final ids = [
+          for (final d in names.docs)
+            if (d.data()['chatId'] is String) d.data()['chatId'] as String
+        ].take(10);
+        final out = <ChatSummary>[];
+        for (final id in ids) {
+          try {
+            final d = await _chats.doc(id).get();
+            if (d.exists && d.data()?['kind'] == 'channel') out.add(_summary(d, const {}));
+          } on FirebaseException {
+            // Юз занят, но канал недоступен — пропускаем.
+          }
+        }
+        return out;
+      });
+
+  @override
+  Future<void> joinChannel(String chatId) => _guard(() =>
+      _chats.doc(chatId).update({'members': FieldValue.arrayUnion([_uid])}));
+
+  @override
+  Future<void> setChatHandle(String chatId, String? handle) => _guard(() async {
+        final h = handle?.replaceFirst('@', '').trim();
+        if (h != null && h.isNotEmpty && !_handleRe.hasMatch(h)) {
+          throw const AuthFailure('Юз: 3–32 латинские буквы, цифры или _');
+        }
+        final chatRef = _chats.doc(chatId);
+        await _db.runTransaction((tx) async {
+          final chat = await tx.get(chatRef);
+          final old = chat.data()?['handleLower'] as String?;
+          final lower = (h == null || h.isEmpty) ? null : h.toLowerCase();
+          if (lower != null && lower != old) {
+            final un = _db.collection('usernames').doc(lower);
+            if ((await tx.get(un)).exists) throw const AuthFailure('Этот юз уже занят');
+            tx.set(un, {'chatId': chatId});
+          }
+          if (old != null && old != lower) tx.delete(_db.collection('usernames').doc(old));
+          tx.update(chatRef, {
+            'handle': lower == null ? FieldValue.delete() : h,
+            'handleLower': lower ?? FieldValue.delete(),
+          });
+        });
+      });
+
+  @override
+  Future<void> setAdmin(String chatId, String userId, bool value) => _guard(() =>
+      _chats.doc(chatId).update({
+        'admins': value ? FieldValue.arrayUnion([userId]) : FieldValue.arrayRemove([userId]),
+      }));
+
   /// Добавить участников (админ группы/канала).
   Future<void> addMembers(String chatId, List<String> userIds) => _guard(() =>
       _chats.doc(chatId).update({'members': FieldValue.arrayUnion(userIds)}));
 
-  /// Убрать участника (админ) или выйти самому.
+  /// Убрать участника (админ) или выйти самому — заодно снимает с него админа.
+  @override
   Future<void> removeMember(String chatId, String userId) => _guard(() =>
-      _chats.doc(chatId).update({'members': FieldValue.arrayRemove([userId])}));
+      _chats.doc(chatId).update({
+        'members': FieldValue.arrayRemove([userId]),
+        'admins': FieldValue.arrayRemove([userId]),
+      }));
 
   Future<void> _patchSettings(Iterable<String> ids, Map<String, dynamic> patch) =>
       _guard(() async {

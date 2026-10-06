@@ -101,6 +101,7 @@ class ChatSummary {
     this.memberCount = 0,
     this.peerId,
     this.canPost = true,
+    this.isAdmin = false,
   });
 
   final String id;
@@ -124,6 +125,9 @@ class ChatSummary {
 
   /// Можно ли мне писать сюда (в каналах — только администраторам).
   final bool canPost;
+
+  /// Я администратор группы или канала.
+  final bool isAdmin;
 
   factory ChatSummary.fromMap(Map<String, dynamic> m) => ChatSummary(
         id: m['id'] as String,
@@ -181,7 +185,34 @@ class ChatSummary {
         memberCount: memberCount ?? this.memberCount,
         peerId: peerId,
         canPost: canPost,
+        isAdmin: isAdmin,
       );
+}
+
+/// Цитата сообщения, на которое отвечают.
+class MessageRef {
+  const MessageRef({required this.id, required this.senderName, required this.text});
+
+  final String id;
+  final String senderName;
+  final String text;
+
+  factory MessageRef.of(Message m) => MessageRef(
+        id: m.id,
+        senderName: m.senderName ?? '',
+        text: m.text.length > 200 ? '${m.text.substring(0, 200)}…' : m.text,
+      );
+
+  Map<String, dynamic> toMap() => {'id': id, 'senderName': senderName, 'text': text};
+
+  static MessageRef? fromMap(Object? v) {
+    if (v is! Map) return null;
+    return MessageRef(
+      id: v['id'] as String? ?? '',
+      senderName: v['senderName'] as String? ?? '',
+      text: v['text'] as String? ?? '',
+    );
+  }
 }
 
 class Message {
@@ -193,6 +224,9 @@ class Message {
     required this.createdAt,
     this.senderName,
     this.read = false,
+    this.replyTo,
+    this.forwardedFrom,
+    this.edited = false,
   });
 
   final String id;
@@ -202,6 +236,13 @@ class Message {
   final DateTime createdAt;
   final String? senderName;
   final bool read;
+
+  /// Ответ на это сообщение.
+  final MessageRef? replyTo;
+
+  /// Имя автора оригинала, если сообщение переслано.
+  final String? forwardedFrom;
+  final bool edited;
 
   factory Message.fromMap(Map<String, dynamic> m) => Message(
         id: m['id'].toString(),
@@ -215,10 +256,26 @@ class Message {
 
 /// Детали чата для страницы профиля группы/канала/собеседника.
 class ChatDetails {
-  const ChatDetails({required this.chat, required this.members, this.about = ''});
+  const ChatDetails({
+    required this.chat,
+    required this.members,
+    this.about = '',
+    this.admins = const {},
+    this.createdBy,
+    this.isMember = true,
+  });
   final ChatSummary chat;
   final List<Profile> members;
   final String about;
+
+  /// Администраторы группы или канала.
+  final Set<String> admins;
+  final String? createdBy;
+
+  /// Я участник (подписчик). Публичный канал можно открыть и без подписки.
+  final bool isMember;
+
+  bool isAdmin(String? uid) => uid != null && admins.contains(uid);
 }
 
 /// Цвет аватарки по строке — как в референсе (оранжевые, фиолетовые, синие кружки).
