@@ -340,7 +340,7 @@ fun ChatScreen(
                 // Кнопка «вниз»
                 val showDown by remember { derivedStateOf { listState.firstVisibleItemIndex > 3 } }
                 val unread = chat?.unread ?: 0
-                AnimatedVisibility(
+                androidx.compose.animation.AnimatedVisibility(
                     showDown,
                     modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
                     enter = scaleIn(spring(Spring.DampingRatioMediumBouncy)) + fadeIn(),

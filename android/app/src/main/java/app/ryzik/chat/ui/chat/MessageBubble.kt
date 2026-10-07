@@ -379,7 +379,7 @@ private fun rememberVideoLoader(): ImageLoader {
 }
 
 @Composable
-private fun MediaBox(file: FileRef, content: @Composable () -> Unit) {
+private fun MediaBox(file: FileRef, content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit) {
     val ratio = if (file.width > 0 && file.height > 0) (file.width.toFloat() / file.height).coerceIn(0.5f, 2f) else 1.3f
     Box(
         Modifier
@@ -438,9 +438,6 @@ private fun MediaVideo(msg: UiMessage, file: FileRef, autoDownload: Boolean) {
         )
     }
 }
-
-@Composable
-private fun Modifier.fillMaxSize(): Modifier = this.then(androidx.compose.foundation.layout.fillMaxSize())
 
 @Composable
 private fun MediaOverlay(msg: UiMessage, file: FileRef, state: MediaState, ready: Boolean, isVideo: Boolean) {
