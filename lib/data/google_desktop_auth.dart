@@ -99,7 +99,7 @@ Future<({String idToken, String accessToken})> googleDesktopSignIn() async {
 
 String _page(bool ok) => '''<!doctype html><html lang="ru"><meta charset="utf-8">
 <title>MilkChat</title>
-<body style="background:#0E211D;color:#E8F5EE;font-family:sans-serif;display:flex;
+<body style="background:#F2F2F4;color:#1C1C1E;font-family:sans-serif;display:flex;
 align-items:center;justify-content:center;height:100vh;margin:0;text-align:center">
 <div><h1>${ok ? 'Готово!' : 'Вход не выполнен'}</h1>
 <p>${ok ? 'Можно закрыть эту вкладку и вернуться в MilkChat.' : 'Вернитесь в MilkChat и попробуйте ещё раз.'}</p></div>

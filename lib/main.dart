@@ -39,14 +39,14 @@ class _FirebaseMissing extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
         debugShowCheckedModeBanner: false,
         home: Scaffold(
-          backgroundColor: const Color(0xFF0E211D),
+          backgroundColor: Colors.white,
           body: Center(
             child: Padding(
               padding: const EdgeInsets.all(32),
               child: Text(
                 'Не удалось подключиться к Firebase на этой платформе.\n\n$error',
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white70),
+                style: const TextStyle(color: Color(0xFF8E8E93)),
               ),
             ),
           ),

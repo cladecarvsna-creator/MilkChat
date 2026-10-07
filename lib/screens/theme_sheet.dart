@@ -215,7 +215,7 @@ class _Swatch extends StatelessWidget {
     final sp = MilkPalette.from(seed, dark ? Brightness.dark : Brightness.light);
     final p = context.palette;
     Widget block(Color c) => Container(
-          decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(8)),
+          decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(12)),
         );
     return GestureDetector(
       onTap: onTap,
