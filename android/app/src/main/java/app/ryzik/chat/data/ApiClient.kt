@@ -148,6 +148,28 @@ class ApiClient(
             archived?.let { put("archived", JsonPrimitive(it)) }
         }), Chat.serializer())
 
+    suspend fun createChannel(title: String, description: String) =
+        call("POST", "/api/chats/channel", buildJsonObject {
+            put("title", title)
+            put("description", description)
+        }, Chat.serializer())
+
+    suspend fun searchChannels(q: String) =
+        call("GET", "/api/channels/search?q=" + java.net.URLEncoder.encode(q, "UTF-8"), null, ListSerializer(Chat.serializer()))
+
+    suspend fun subscribe(chatId: String) = call("POST", "/api/chats/$chatId/subscribe", null, Chat.serializer())
+
+    suspend fun setChannelRole(chatId: String, userId: String, admin: Boolean) =
+        call("PUT", "/api/chats/$chatId/members/$userId/role", buildJsonObject { put("role", if (admin) "admin" else "subscriber") }, Chat.serializer())
+
+    suspend fun updateChannel(chatId: String, title: String, description: String) =
+        call("PATCH", "/api/chats/$chatId", buildJsonObject {
+            put("title", title)
+            put("description", description)
+        }, Chat.serializer())
+
+    suspend fun callsConfig() = call("GET", "/api/calls/config", null, JsonObject.serializer())
+
     suspend fun addMembers(chatId: String, userIds: List<String>) =
         call("POST", "/api/chats/$chatId/members", JsonObject(mapOf(
             "userIds" to kotlinx.serialization.json.JsonArray(userIds.map { JsonPrimitive(it) }),
@@ -239,6 +261,9 @@ class ApiClient(
     suspend fun deleteBadge(id: String) = callUnit("DELETE", "/api/admin/badges/$id")
     suspend fun grantBadge(userId: String, badgeId: String) = call("PUT", "/api/admin/users/$userId/badges/$badgeId", null, User.serializer())
     suspend fun revokeBadge(userId: String, badgeId: String) = call("DELETE", "/api/admin/users/$userId/badges/$badgeId", null, User.serializer())
+    suspend fun setPremium(userId: String, isPremium: Boolean) =
+        call("PUT", "/api/admin/users/$userId/premium", buildJsonObject { put("isPremium", isPremium) }, User.serializer())
+
     suspend fun setAdmin(userId: String, isAdmin: Boolean) =
         call("PUT", "/api/admin/users/$userId/admin", buildJsonObject { put("isAdmin", isAdmin) }, User.serializer())
 }

@@ -4,12 +4,15 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { tx } from './db.js';
+import { DOCS_HTML } from './docs.js';
 
 const now = () => Date.now();
 const newId = () => crypto.randomUUID();
 
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,32}$/;
-const MESSAGE_TYPES = new Set(['text', 'image', 'video', 'file', 'voice', 'sticker']);
+const MESSAGE_TYPES = new Set(['text', 'image', 'video', 'file', 'voice', 'square', 'sticker']);
+const FREE_FILE_MB = Number(process.env.FREE_FILE_MB ?? 200);
+const PREMIUM_FILE_MB = Number(process.env.MAX_FILE_MB ?? 2048);
 const MAX_PAYLOAD = 64 * 1024;
 
 export class HttpError extends Error {
@@ -60,6 +63,7 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
       bio: row.bio,
       avatarFileId: row.avatar_file_id ?? null,
       isAdmin: !!row.is_admin,
+      isPremium: !!row.is_premium,
       publicKey: row.public_key,
       online: hub.isOnline(row.id),
       lastSeen: row.last_seen,
@@ -107,36 +111,45 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
     'SELECT COUNT(*) AS n FROM messages WHERE chat_id = ? AND seq > ? AND sender_id != ? AND deleted = 0');
   const getChatRow = db.prepare('SELECT * FROM chats WHERE id = ?');
 
-  function chatView(chatId, userId) {
+  const memberCountStmt = db.prepare('SELECT COUNT(*) AS n FROM chat_members WHERE chat_id = ?');
+
+  /** Представление чата для пользователя. preview=true — для каналов, на которые он ещё не подписан. */
+  function chatView(chatId, userId, { preview = false } = {}) {
     const chat = getChatRow.get(chatId);
     const me = membershipStmt.get(chatId, userId);
-    if (!chat || !me) return null;
-    const members = db.prepare('SELECT user_id, role FROM chat_members WHERE chat_id = ?').all(chatId);
+    if (!chat || (!me && !(preview && chat.type === 'channel'))) return null;
+    // У канала могут быть тысячи подписчиков — отдаём только владельца и админов.
+    const members = chat.type === 'channel'
+      ? db.prepare("SELECT user_id, role FROM chat_members WHERE chat_id = ? AND role IN ('owner', 'admin')").all(chatId)
+      : db.prepare('SELECT user_id, role FROM chat_members WHERE chat_id = ?').all(chatId);
     const last = lastMessageStmt.get(chatId);
     return {
       id: chat.id,
       type: chat.type,
       title: chat.title,
+      description: chat.description ?? '',
       avatarFileId: chat.avatar_file_id ?? null,
       createdBy: chat.created_by,
       createdAt: chat.created_at,
       members: members.map((m) => ({ user: getUser(m.user_id), role: m.role })),
+      memberCount: memberCountStmt.get(chatId).n,
+      myRole: me?.role ?? null,
       lastMessage: last ? publicMessage(last) : null,
-      unread: unreadStmt.get(chatId, me.last_read_seq, userId).n,
-      lastReadSeq: me.last_read_seq,
-      pinned: !!me.pinned,
-      muted: !!me.muted,
-      archived: !!me.archived,
+      unread: me ? unreadStmt.get(chatId, me.last_read_seq, userId).n : 0,
+      lastReadSeq: me?.last_read_seq ?? 0,
+      pinned: !!me?.pinned,
+      muted: !!me?.muted,
+      archived: !!me?.archived,
     };
   }
 
-  function createChat({ type, title = '', createdBy, members, directKey = null }) {
+  function createChat({ type, title = '', description = '', createdBy, members, directKey = null }) {
     const id = newId();
     const t = now();
-    db.prepare('INSERT INTO chats (id, type, title, created_by, created_at, direct_key) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, type, title, createdBy, t, directKey);
+    db.prepare('INSERT INTO chats (id, type, title, description, created_by, created_at, direct_key) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(id, type, title, description, createdBy, t, directKey);
     const add = db.prepare('INSERT INTO chat_members (chat_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)');
-    for (const m of members) add.run(id, m, m === createdBy ? 'owner' : 'member', t);
+    for (const m of members) add.run(id, m, m === createdBy ? 'owner' : type === 'channel' ? 'subscriber' : 'member', t);
     return id;
   }
 
@@ -171,7 +184,11 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
     return token;
   }
 
-  app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'RyzikChat', version: '0.1.0' }));
+  app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'RyzikChat', version: '0.2.0', apiVersion: 1 }));
+
+  // Открытое описание API — чтобы можно было написать клиент под любое устройство.
+  app.get('/api/openapi.json', (_req, res) => res.sendFile(path.join(import.meta.dirname, '..', 'openapi.json')));
+  app.get('/api/docs', (_req, res) => res.type('html').send(DOCS_HTML));
 
   app.post('/api/auth/register', (req, res) => {
     const { username, displayName, password, publicKey, encryptedPrivateKey, device } = req.body ?? {};
@@ -292,8 +309,9 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
   });
 
   app.get('/api/chats/:id', (req, res) => {
-    requireMember(req.params.id, req.userId);
-    res.json(chatView(req.params.id, req.userId));
+    const view = chatView(req.params.id, req.userId, { preview: true });
+    if (!view) throw new HttpError(404, 'chat_not_found', 'Чат не найден');
+    res.json(view);
   });
 
   app.post('/api/chats/direct', (req, res) => {
@@ -326,11 +344,50 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
     res.status(201).json(chatView(chatId, req.userId));
   });
 
+  // ---------- каналы ----------
+
+  app.post('/api/chats/channel', (req, res) => {
+    const title = String(req.body?.title ?? '').trim().slice(0, 128);
+    if (!title) throw new HttpError(400, 'bad_title', 'Укажите название канала');
+    const description = String(req.body?.description ?? '').trim().slice(0, 500);
+    const chatId = tx(db, () => createChat({ type: 'channel', title, description, createdBy: req.userId, members: [req.userId] }));
+    res.status(201).json(chatView(chatId, req.userId));
+  });
+
+  app.get('/api/channels/search', (req, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const like = `%${q.replace(/[%_\\]/g, (c) => '\\' + c)}%`;
+    const rows = db.prepare(`SELECT c.id, (SELECT COUNT(*) FROM chat_members m WHERE m.chat_id = c.id) AS n FROM chats c
+      WHERE c.type = 'channel' AND (c.title LIKE ? ESCAPE '\\' OR c.description LIKE ? ESCAPE '\\')
+      ORDER BY n DESC LIMIT 30`).all(like, like);
+    res.json(rows.map((r) => chatView(r.id, req.userId, { preview: true })));
+  });
+
+  app.post('/api/chats/:id/subscribe', (req, res) => {
+    const chat = getChatRow.get(req.params.id);
+    if (!chat || chat.type !== 'channel') throw new HttpError(404, 'chat_not_found', 'Канал не найден');
+    db.prepare("INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, last_read_seq, joined_at) VALUES (?, ?, 'subscriber', ?, ?)")
+      .run(chat.id, req.userId, chat.last_seq, now());
+    res.json(chatView(chat.id, req.userId));
+  });
+
+  app.put('/api/chats/:id/members/:userId/role', (req, res) => {
+    const m = requireMember(req.params.id, req.userId);
+    const chat = getChatRow.get(req.params.id);
+    if (chat.type !== 'channel' || m.role !== 'owner') throw new HttpError(403, 'forbidden', 'Только владелец канала');
+    const role = req.body?.role === 'admin' ? 'admin' : 'subscriber';
+    db.prepare("UPDATE chat_members SET role = ? WHERE chat_id = ? AND user_id = ? AND role != 'owner'").run(role, chat.id, req.params.userId);
+    res.json(chatView(chat.id, req.userId));
+  });
+
   app.patch('/api/chats/:id', (req, res) => {
     const m = requireMember(req.params.id, req.userId);
     const chat = getChatRow.get(req.params.id);
-    const { title, avatarFileId } = req.body ?? {};
-    if (chat.type !== 'group' || m.role !== 'owner') throw new HttpError(403, 'forbidden', 'Только владелец группы');
+    const { title, avatarFileId, description } = req.body ?? {};
+    if (!['group', 'channel'].includes(chat.type) || !['owner', 'admin'].includes(m.role)) {
+      throw new HttpError(403, 'forbidden', 'Только владелец или админ');
+    }
+    if (description !== undefined) db.prepare('UPDATE chats SET description = ? WHERE id = ?').run(String(description).slice(0, 500), chat.id);
     if (title !== undefined) db.prepare('UPDATE chats SET title = ? WHERE id = ?').run(String(title).slice(0, 128), chat.id);
     if (avatarFileId !== undefined) db.prepare('UPDATE chats SET avatar_file_id = ? WHERE id = ?').run(avatarFileId || null, chat.id);
     broadcastChat(chat.id, { type: 'chat.updated', chatId: chat.id });
@@ -366,8 +423,11 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
     const m = requireMember(req.params.id, req.userId);
     const chat = getChatRow.get(req.params.id);
     const target = req.params.userId;
-    if (chat.type !== 'group') throw new HttpError(400, 'not_group', 'Это не группа');
-    if (target !== req.userId && m.role !== 'owner') throw new HttpError(403, 'forbidden', 'Только владелец группы');
+    if (!['group', 'channel'].includes(chat.type)) throw new HttpError(400, 'not_group', 'Это не группа и не канал');
+    if (target !== req.userId && m.role !== 'owner') throw new HttpError(403, 'forbidden', 'Только владелец');
+    if (target === req.userId && m.role === 'owner' && chat.type === 'channel') {
+      throw new HttpError(400, 'owner_leave', 'Владелец не может покинуть свой канал');
+    }
     const before = memberIds(chat.id);
     db.prepare('DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?').run(chat.id, target);
     hub.sendToUsers(before, { type: 'chat.updated', chatId: chat.id });
@@ -393,7 +453,7 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
   // ---------- messages ----------
 
   app.get('/api/chats/:id/messages', (req, res) => {
-    requireMember(req.params.id, req.userId);
+    if (getChatRow.get(req.params.id)?.type !== 'channel') requireMember(req.params.id, req.userId);
     const limit = Math.min(Number(req.query.limit ?? 50) || 50, 200);
     const before = req.query.before ? Number(req.query.before) : Number.MAX_SAFE_INTEGER;
     const after = req.query.after ? Number(req.query.after) : 0;
@@ -403,7 +463,10 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
   });
 
   app.post('/api/chats/:id/messages', (req, res) => {
-    requireMember(req.params.id, req.userId);
+    const member = requireMember(req.params.id, req.userId);
+    if (getChatRow.get(req.params.id).type === 'channel' && !['owner', 'admin'].includes(member.role)) {
+      throw new HttpError(403, 'forbidden', 'Писать в канал могут только его админы');
+    }
     const { type = 'text', payload, replyTo, forwardedFrom, clientId } = req.body ?? {};
     if (!MESSAGE_TYPES.has(type)) throw new HttpError(400, 'bad_type', 'Неизвестный тип сообщения');
     if (typeof payload !== 'string' || payload.length > MAX_PAYLOAD) {
@@ -480,11 +543,15 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
       destination: filesDir,
       filename: (_req, _file, cb) => cb(null, newId()),
     }),
-    limits: { fileSize: Number(process.env.MAX_FILE_MB ?? 2048) * 1024 * 1024 },
+    limits: { fileSize: PREMIUM_FILE_MB * 1024 * 1024 },
   });
 
   app.post('/api/files', upload.single('file'), (req, res) => {
     if (!req.file) throw new HttpError(400, 'no_file', 'Файл не получен');
+    if (!getUserRow.get(req.userId).is_premium && req.file.size > FREE_FILE_MB * 1024 * 1024) {
+      fs.rmSync(req.file.path, { force: true });
+      throw new HttpError(413, 'too_large', `Без Премиума можно отправлять файлы до ${FREE_FILE_MB} МБ`);
+    }
     const id = req.file.filename;
     const mime = String(req.body?.mime ?? req.file.mimetype ?? 'application/octet-stream').slice(0, 100);
     db.prepare('INSERT INTO files (id, owner_id, size, mime, created_at) VALUES (?, ?, ?, ?, ?)')
@@ -540,6 +607,26 @@ export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
     const u = getUser(req.params.id);
     if (u) hub.broadcastUser(u.id, { type: 'user.updated', user: u });
     res.json(u);
+  });
+
+  app.put('/api/admin/users/:id/premium', adminOnly, (req, res) => {
+    db.prepare('UPDATE users SET is_premium = ? WHERE id = ?').run(req.body?.isPremium ? 1 : 0, req.params.id);
+    const u = getUser(req.params.id);
+    if (!u) throw new HttpError(404, 'user_not_found', 'Пользователь не найден');
+    hub.broadcastUser(u.id, { type: 'user.updated', user: u });
+    res.json(u);
+  });
+
+  // ---------- звонки ----------
+  // Сам звонок идёт напрямую между устройствами (WebRTC, шифрование DTLS-SRTP),
+  // сервер только передаёт сигналы через WebSocket и раздаёт адреса STUN/TURN.
+
+  app.get('/api/calls/config', (_req, res) => {
+    const iceServers = [{ urls: (process.env.STUN_URLS ?? 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302').split(',') }];
+    if (process.env.TURN_URL) {
+      iceServers.push({ urls: process.env.TURN_URL.split(','), username: process.env.TURN_USER ?? '', credential: process.env.TURN_PASS ?? '' });
+    }
+    res.json({ iceServers });
   });
 
   app.put('/api/admin/users/:id/admin', adminOnly, (req, res) => {

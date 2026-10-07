@@ -56,6 +56,15 @@ export class Hub {
         if (msg.type === 'typing' && typeof msg.chatId === 'string' && locals.isMember(msg.chatId, userId)) {
           const others = locals.memberIds(msg.chatId).filter((id) => id !== userId);
           this.sendToUsers(others, { type: 'typing', chatId: msg.chatId, userId, action: msg.action ?? 'typing' });
+        } else if (msg.type === 'call.signal' && typeof msg.to === 'string' && msg.data && typeof msg.data === 'object') {
+          // Сигналы WebRTC (offer/answer/ice/hangup…) пересылаем, только если у людей есть общий чат.
+          if (msg.to !== userId && locals.sharedChatPeers(userId).includes(msg.to)) {
+            const delivered = this.isOnline(msg.to);
+            this.sendToUsers([msg.to], { type: 'call.signal', from: userId, data: msg.data });
+            if (!delivered && msg.data.kind === 'offer') {
+              ws.send(JSON.stringify({ type: 'call.signal', from: msg.to, data: { kind: 'unavailable', callId: msg.data.callId } }));
+            }
+          }
         } else if (msg.type === 'ping') {
           ws.send(JSON.stringify({ type: 'pong' }));
         }

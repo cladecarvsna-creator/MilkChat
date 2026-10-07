@@ -3,6 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY src ./src
+COPY openapi.json ./
 ENV PORT=8080 DATA_DIR=/data
 VOLUME /data
 EXPOSE 8080

@@ -1,6 +1,7 @@
 package app.ryzik.chat.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 // ---------- То, что приходит с сервера ----------
 
@@ -21,6 +22,7 @@ data class User(
     val bio: String = "",
     val avatarFileId: String? = null,
     val isAdmin: Boolean = false,
+    val isPremium: Boolean = false,
     val publicKey: String = "",
     val online: Boolean = false,
     val lastSeen: Long = 0,
@@ -53,8 +55,11 @@ data class ChatMember(val user: User, val role: String)
 @Serializable
 data class Chat(
     val id: String,
-    val type: String, // direct | group | saved
+    val type: String, // direct | group | saved | channel
     val title: String = "",
+    val description: String = "",
+    val memberCount: Int = 0,
+    val myRole: String? = null,
     val avatarFileId: String? = null,
     val createdBy: String = "",
     val createdAt: Long = 0,
@@ -95,6 +100,8 @@ data class FileRef(
     val width: Int = 0,
     val height: Int = 0,
     val durationMs: Long = 0,
+    /** Для голосовых: громкость по ходу записи, base64 от массива байт 0..100. */
+    val waveform: String = "",
 )
 
 @Serializable
@@ -117,4 +124,6 @@ data class RealtimeEvent(
     val online: Boolean? = null,
     val lastSeen: Long? = null,
     val action: String? = null,
+    val from: String? = null,
+    val data: JsonObject? = null,
 )

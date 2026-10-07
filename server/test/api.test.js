@@ -88,3 +88,58 @@ test('регистрация, чаты, сообщения, бейджи, websoc
   assert.ok(types.includes('user.updated'));
   ws.close();
 });
+
+test('каналы, премиум, сигналы звонков, документация API', async () => {
+  const owner = await reg('chanowner');
+  const fan = await reg('chanfan');
+  const ch = await api('POST', '/api/chats/channel', { title: 'Новости Рыжика', description: 'Всё самое важное' }, owner.body.token);
+  assert.equal(ch.status, 201);
+  assert.equal(ch.body.type, 'channel');
+  assert.equal(ch.body.myRole, 'owner');
+
+  const found = await api('GET', '/api/channels/search?q=Рыжик', null, fan.body.token);
+  assert.equal(found.body[0].id, ch.body.id);
+  assert.equal(found.body[0].myRole, null);
+
+  const post = await api('POST', `/api/chats/${ch.body.id}/messages`, { type: 'text', payload: '{"v":0,"plain":{"text":"Привет"}}' }, owner.body.token);
+  assert.equal(post.status, 201);
+  // Не подписан, но читать публичный канал можно
+  assert.equal((await api('GET', `/api/chats/${ch.body.id}/messages`, null, fan.body.token)).body.length, 1);
+
+  const sub = await api('POST', `/api/chats/${ch.body.id}/subscribe`, null, fan.body.token);
+  assert.equal(sub.body.myRole, 'subscriber');
+  assert.equal(sub.body.memberCount, 2);
+  assert.equal(sub.body.unread, 0);
+  // Подписчик писать не может
+  assert.equal((await api('POST', `/api/chats/${ch.body.id}/messages`, { type: 'text', payload: 'x' }, fan.body.token)).status, 403);
+  // Отписка
+  assert.equal((await api('DELETE', `/api/chats/${ch.body.id}/members/${fan.body.user.id}`, null, fan.body.token)).status, 200);
+  assert.equal((await api('GET', '/api/chats', null, fan.body.token)).body.some((c) => c.id === ch.body.id), false);
+
+  // Премиум выдаёт только админ (alice из первого теста)
+  const alice = await api('POST', '/api/auth/login', { username: 'alice', password: 'x'.repeat(64) });
+  assert.equal((await api('PUT', `/api/admin/users/${fan.body.user.id}/premium`, { isPremium: true }, fan.body.token)).status, 403);
+  const prem = await api('PUT', `/api/admin/users/${fan.body.user.id}/premium`, { isPremium: true }, alice.body.token);
+  assert.equal(prem.body.isPremium, true);
+
+  // Сигналы звонка доходят только тем, с кем есть общий чат
+  await api('POST', '/api/chats/direct', { userId: fan.body.user.id }, owner.body.token);
+  const wsUrl = (t) => `${base.replace('http', 'ws')}/ws?token=${t}`;
+  const a = new WebSocket(wsUrl(owner.body.token));
+  const b = new WebSocket(wsUrl(fan.body.token));
+  const got = [];
+  b.on('message', (d) => got.push(JSON.parse(String(d))));
+  await Promise.all([new Promise((r) => a.on('open', r)), new Promise((r) => b.on('open', r))]);
+  a.send(JSON.stringify({ type: 'call.signal', to: fan.body.user.id, data: { kind: 'offer', callId: 'c1', sdp: 'v=0' } }));
+  await new Promise((r) => setTimeout(r, 150));
+  const sig = got.find((e) => e.type === 'call.signal');
+  assert.equal(sig.from, owner.body.user.id);
+  assert.equal(sig.data.kind, 'offer');
+  a.close(); b.close();
+
+  const cfg = await api('GET', '/api/calls/config', null, fan.body.token);
+  assert.ok(cfg.body.iceServers.length >= 1);
+  const spec = await fetch(base + '/api/openapi.json');
+  assert.equal(spec.status, 200);
+  assert.ok((await spec.json()).paths['/api/chats/channel']);
+});

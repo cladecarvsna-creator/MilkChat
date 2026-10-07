@@ -17,6 +17,7 @@ export function openDb(dataDir) {
       bio TEXT NOT NULL DEFAULT '',
       avatar_file_id TEXT,
       is_admin INTEGER NOT NULL DEFAULT 0,
+      is_premium INTEGER NOT NULL DEFAULT 0,
       public_key TEXT NOT NULL,
       encrypted_private_key TEXT NOT NULL,
       created_at INTEGER NOT NULL,
@@ -32,8 +33,9 @@ export function openDb(dataDir) {
 
     CREATE TABLE IF NOT EXISTS chats (
       id TEXT PRIMARY KEY,
-      type TEXT NOT NULL CHECK (type IN ('direct', 'group', 'saved')),
+      type TEXT NOT NULL CHECK (type IN ('direct', 'group', 'saved', 'channel')),
       title TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
       avatar_file_id TEXT,
       created_by TEXT NOT NULL,
       created_at INTEGER NOT NULL,
@@ -103,7 +105,38 @@ export function openDb(dataDir) {
       PRIMARY KEY (user_id, badge_id)
     );
   `);
+  migrate(db);
   return db;
+}
+
+/** Обновляет базу, созданную прошлыми версиями сервера. */
+function migrate(db) {
+  const cols = (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols('users').includes('is_premium')) db.exec('ALTER TABLE users ADD COLUMN is_premium INTEGER NOT NULL DEFAULT 0');
+  const chatsSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chats'").get().sql;
+  if (!chatsSql.includes("'channel'")) {
+    db.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE chats_new (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK (type IN ('direct', 'group', 'saved', 'channel')),
+        title TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        avatar_file_id TEXT,
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_seq INTEGER NOT NULL DEFAULT 0,
+        direct_key TEXT UNIQUE
+      );
+      INSERT INTO chats_new (id, type, title, avatar_file_id, created_by, created_at, last_seq, direct_key)
+        SELECT id, type, title, avatar_file_id, created_by, created_at, last_seq, direct_key FROM chats;
+      DROP TABLE chats;
+      ALTER TABLE chats_new RENAME TO chats;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+  }
 }
 
 /** Выполняет fn внутри транзакции. */
