@@ -472,7 +472,7 @@ fun ChatScreen(
                 }
             }
 
-            val canPost = chat?.type != "channel" || chat.myRole == "owner" || chat.myRole == "admin"
+            val canPost = chat == null || chat.type != "channel" || chat.myRole == "owner" || chat.myRole == "admin"
             if (!canPost && chat != null) {
                 ChannelBar(
                     subscribed = chat.myRole != null,
