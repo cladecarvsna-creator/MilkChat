@@ -63,4 +63,4 @@ web/.htaccess  SPA-fallback, HTTPS и кэш для Apache
 tool/          иконки, админ-скрипт, тест правил
 ```
 
-Шрифт Nunito — SIL Open Font License (`assets/fonts/OFL.txt`).
+Шрифт Unbounded — SIL Open Font License (`assets/fonts/OFL.txt`).

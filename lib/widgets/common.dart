@@ -179,8 +179,8 @@ class TileCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    const big = Radius.circular(28);
-    const small = Radius.circular(10);
+    const big = Radius.circular(30);
+    const small = Radius.circular(16);
     final radius = BorderRadius.vertical(
       top: first ? big : small,
       bottom: last ? big : small,
@@ -331,15 +331,12 @@ class _PatternPainter extends CustomPainter {
       old.shapes != shapes;
 }
 
-/// Логотип MilkChat — волнистый пузырь с хвостиком (как иконка приложения).
+/// Логотип MilkChat — тёмно-зелёный цветок с мягкой тенью (как иконка приложения).
 class MilkLogo extends StatelessWidget {
   const MilkLogo({super.key, this.size = 96});
   final double size;
 
   @override
-  Widget build(BuildContext context) => ClipRRect(
-        borderRadius: BorderRadius.circular(size * 0.24),
-        child: Image.asset('assets/icon/icon.png',
-            width: size, height: size, filterQuality: FilterQuality.medium),
-      );
+  Widget build(BuildContext context) => Image.asset('assets/icon/logo.png',
+      width: size, height: size, filterQuality: FilterQuality.medium);
 }

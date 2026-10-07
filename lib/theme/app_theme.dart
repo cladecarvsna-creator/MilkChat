@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Цветовые пресеты из листа «Оформление». Первый — фирменный мятный MilkChat.
+/// Цветовые пресеты из листа «Оформление». Первый — фирменный графит MilkChat,
+/// второй — тёмно-зелёный из логотипа.
 const accentPresets = <Color>[
-  Color(0xFF5EE0C0), // мята (по умолчанию)
+  Color(0xFF2C2C2E), // графит (по умолчанию)
+  Color(0xFF35534D), // зелень логотипа
   Color(0xFF7C8CFF), // лавандовый
   Color(0xFFEF6B57), // коралловый
-  Color(0xFF9AA0A6), // графит
   Color(0xFF4DA8FF), // голубой
   Color(0xFF5CD67A), // зелёный
   Color(0xFFFF8A3D), // оранжевый
@@ -39,7 +40,7 @@ class MilkPalette extends ThemeExtension<MilkPalette> {
   final Color accent;
   final Color onAccent;
 
-  /// Имена чатов и заголовки карточек (в тёмной теме — мятные).
+  /// Имена чатов и заголовки карточек.
   final Color title;
   final Color text;
   final Color muted;
@@ -50,46 +51,48 @@ class MilkPalette extends ThemeExtension<MilkPalette> {
   final Color pattern;
   final Color nav;
 
+  /// Фон и поверхности всегда бело-серые, от акцентного цвета зависят
+  /// только кнопки, свои пузыри и выделения.
   factory MilkPalette.from(Color seed, Brightness brightness) {
     final hsl = HSLColor.fromColor(seed);
-    final h = hsl.hue;
-    final s = hsl.saturation;
-    Color c(double sat, double light) =>
-        HSLColor.fromAHSL(1, h, (s * sat).clamp(0, 1), light).toColor();
+    final gray = hsl.saturation < 0.12;
+    Color c(double light) => hsl.withLightness(light).toColor();
 
     if (brightness == Brightness.dark) {
+      final accent = gray ? const Color(0xFFE5E5EA) : c(hsl.lightness.clamp(0.55, 0.7));
       return MilkPalette(
-        background: c(0.55, 0.09),
-        surface: c(0.45, 0.18),
-        surfaceHigh: c(0.45, 0.24),
-        accent: c(1.0, 0.63),
-        onAccent: c(0.6, 0.12),
-        title: c(1.0, 0.68),
-        text: const Color(0xFFF1F5F4),
-        muted: c(0.35, 0.62),
-        bubbleIn: c(0.45, 0.20),
-        onBubbleIn: const Color(0xFFF1F5F4),
-        bubbleOut: c(0.95, 0.75),
-        onBubbleOut: c(0.6, 0.13),
-        pattern: c(0.3, 0.21),
-        nav: c(0.55, 0.07),
+        background: const Color(0xFF121214),
+        surface: const Color(0xFF1E1E21),
+        surfaceHigh: const Color(0xFF2A2A2E),
+        accent: accent,
+        onAccent: const Color(0xFF121214),
+        title: const Color(0xFFF2F2F7),
+        text: const Color(0xFFF2F2F7),
+        muted: const Color(0xFF8E8E93),
+        bubbleIn: const Color(0xFF2A2A2E),
+        onBubbleIn: const Color(0xFFF2F2F7),
+        bubbleOut: accent,
+        onBubbleOut: const Color(0xFF121214),
+        pattern: const Color(0xFF1C1C1F),
+        nav: const Color(0xFF1E1E21),
       );
     }
+    final accent = gray ? seed : c(hsl.lightness.clamp(0.3, 0.5));
     return MilkPalette(
-      background: c(0.45, 0.95),
-      surface: c(0.35, 0.89),
-      surfaceHigh: c(0.40, 0.83),
-      accent: c(0.9, 0.38),
+      background: Colors.white,
+      surface: const Color(0xFFF2F2F4),
+      surfaceHigh: const Color(0xFFE7E7EA),
+      accent: accent,
       onAccent: Colors.white,
-      title: c(0.9, 0.28),
-      text: c(0.4, 0.12),
-      muted: c(0.25, 0.40),
-      bubbleIn: Colors.white,
-      onBubbleIn: c(0.4, 0.12),
-      bubbleOut: c(0.75, 0.42),
+      title: const Color(0xFF1C1C1E),
+      text: const Color(0xFF1C1C1E),
+      muted: const Color(0xFF8E8E93),
+      bubbleIn: const Color(0xFFF0F0F2),
+      onBubbleIn: const Color(0xFF1C1C1E),
+      bubbleOut: accent,
       onBubbleOut: Colors.white,
-      pattern: c(0.3, 0.80),
-      nav: c(0.4, 0.98),
+      pattern: const Color(0xFFEDEDF0),
+      nav: Colors.white,
     );
   }
 
@@ -141,9 +144,13 @@ ThemeData buildTheme(Color seed, Brightness brightness) {
     brightness: brightness,
     colorScheme: scheme,
     scaffoldBackgroundColor: p.background,
-    fontFamily: 'Nunito',
+    fontFamily: 'Unbounded',
     extensions: [p],
   );
+  const stadium = StadiumBorder();
+  RoundedRectangleBorder rounded(double r) =>
+      RoundedRectangleBorder(borderRadius: BorderRadius.circular(r));
+  const label = TextStyle(fontFamily: 'Unbounded', fontWeight: FontWeight.w600, fontSize: 14);
   return base.copyWith(
     textTheme: base.textTheme.apply(bodyColor: p.text, displayColor: p.text),
     iconTheme: IconThemeData(color: p.accent),
@@ -151,7 +158,7 @@ ThemeData buildTheme(Color seed, Brightness brightness) {
     splashFactory: InkSparkle.splashFactory,
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: p.surfaceHigh,
+      fillColor: p.surface,
       hintStyle: TextStyle(color: p.muted),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(28),
@@ -164,26 +171,67 @@ ThemeData buildTheme(Color seed, Brightness brightness) {
         backgroundColor: p.accent,
         foregroundColor: p.onAccent,
         minimumSize: const Size.fromHeight(52),
-        shape: const StadiumBorder(),
-        textStyle: const TextStyle(fontFamily: 'Nunito', fontWeight: FontWeight.w700, fontSize: 16),
+        shape: stadium,
+        textStyle: label.copyWith(fontSize: 15),
       ),
     ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        foregroundColor: p.text,
+        side: BorderSide(color: p.surfaceHigh, width: 1.5),
+        shape: stadium,
+        textStyle: label,
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(foregroundColor: p.accent, shape: stadium, textStyle: label),
+    ),
+    elevatedButtonTheme: ElevatedButtonThemeData(
+      style: ElevatedButton.styleFrom(shape: stadium, textStyle: label),
+    ),
+    iconButtonTheme: IconButtonThemeData(style: IconButton.styleFrom(shape: const CircleBorder())),
+    floatingActionButtonTheme: FloatingActionButtonThemeData(
+      backgroundColor: p.accent,
+      foregroundColor: p.onAccent,
+      shape: rounded(24),
+    ),
+    cardTheme: CardThemeData(color: p.surface, elevation: 0, shape: rounded(28)),
+    chipTheme: ChipThemeData(shape: stadium, side: BorderSide.none, backgroundColor: p.surface),
+    listTileTheme: ListTileThemeData(shape: rounded(20)),
     bottomSheetTheme: BottomSheetThemeData(
       backgroundColor: p.background,
       showDragHandle: true,
-      dragHandleColor: p.muted,
+      dragHandleColor: p.surfaceHigh,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(36)),
+      ),
     ),
-    dialogTheme: DialogThemeData(backgroundColor: p.surface),
+    dialogTheme: DialogThemeData(backgroundColor: p.background, shape: rounded(32)),
+    popupMenuTheme: PopupMenuThemeData(color: p.background, shape: rounded(22), elevation: 6),
+    menuTheme: MenuThemeData(
+      style: MenuStyle(shape: WidgetStatePropertyAll(rounded(22))),
+    ),
+    tooltipTheme: TooltipThemeData(
+      decoration: BoxDecoration(color: p.text, borderRadius: BorderRadius.circular(14)),
+      textStyle: TextStyle(color: p.background, fontSize: 12),
+    ),
     snackBarTheme: SnackBarThemeData(
-      backgroundColor: p.surfaceHigh,
-      contentTextStyle: TextStyle(color: p.text),
+      backgroundColor: p.text,
+      contentTextStyle: TextStyle(color: p.background, fontFamily: 'Unbounded'),
       behavior: SnackBarBehavior.floating,
+      shape: rounded(22),
+    ),
+    progressIndicatorTheme: ProgressIndicatorThemeData(
+      color: p.accent,
+      linearTrackColor: p.surfaceHigh,
+      borderRadius: BorderRadius.circular(8),
     ),
     switchTheme: SwitchThemeData(
       thumbColor: WidgetStateProperty.resolveWith(
           (s) => s.contains(WidgetState.selected) ? p.onAccent : p.muted),
       trackColor: WidgetStateProperty.resolveWith(
           (s) => s.contains(WidgetState.selected) ? p.accent : p.surfaceHigh),
+      trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
     ),
   );
 }
@@ -191,10 +239,14 @@ ThemeData buildTheme(Color seed, Brightness brightness) {
 /// Настройки оформления, сохраняются на устройстве.
 class ThemeController extends ChangeNotifier {
   ThemeController(this._prefs)
-      : _mode = ThemeMode.values[_prefs.getInt('theme_mode') ?? ThemeMode.dark.index],
-        _accent = Color(_prefs.getInt('accent') ?? accentPresets.first.toARGB32()),
+      : _mode = ThemeMode.values[_prefs.getInt(_modeKey) ?? ThemeMode.light.index],
+        _accent = Color(_prefs.getInt(_accentKey) ?? accentPresets.first.toARGB32()),
         _floatingShapes = _prefs.getBool('floating_shapes') ?? true,
         _patternIcons = _prefs.getBool('pattern_icons') ?? true;
+
+  // Ключи с суффиксом v2: после редизайна все начинают со светлой бело-серой темы.
+  static const _modeKey = 'theme_mode_v2';
+  static const _accentKey = 'accent_v2';
 
   final SharedPreferences _prefs;
   ThemeMode _mode;
@@ -209,13 +261,13 @@ class ThemeController extends ChangeNotifier {
 
   set mode(ThemeMode v) {
     _mode = v;
-    _prefs.setInt('theme_mode', v.index);
+    _prefs.setInt(_modeKey, v.index);
     notifyListeners();
   }
 
   set accent(Color v) {
     _accent = v;
-    _prefs.setInt('accent', v.toARGB32());
+    _prefs.setInt(_accentKey, v.toARGB32());
     notifyListeners();
   }
 

@@ -510,8 +510,8 @@ class _Bubble extends StatelessWidget {
     final fg = mine ? p.onBubbleOut : p.onBubbleIn;
     final isCommand =
         message.text.startsWith('/') && !message.text.contains(' ');
-    const r = Radius.circular(22);
-    const small = Radius.circular(8);
+    const r = Radius.circular(24);
+    const small = Radius.circular(10);
 
     final bubble = GestureDetector(
       onLongPress: () => _showActions(context),
@@ -835,7 +835,7 @@ class _Quote extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(10, 4, 10, 4),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(14),
         border: Border(left: BorderSide(color: color, width: 3)),
       ),
       child: Column(

@@ -152,7 +152,7 @@ class _NavPill extends StatelessWidget {
         color: p.nav,
         borderRadius: BorderRadius.circular(40),
         boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 18),
+          BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 24, offset: const Offset(0, 6)),
         ],
       ),
       child: Row(

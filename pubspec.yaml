@@ -70,18 +70,21 @@ flutter:
   uses-material-design: true
 
   fonts:
-    - family: Nunito
+    - family: Unbounded
       fonts:
-        - asset: assets/fonts/Nunito-400.ttf
-        - asset: assets/fonts/Nunito-600.ttf
+        - asset: assets/fonts/Unbounded-400.ttf
+        - asset: assets/fonts/Unbounded-500.ttf
+          weight: 500
+        - asset: assets/fonts/Unbounded-600.ttf
           weight: 600
-        - asset: assets/fonts/Nunito-700.ttf
+        - asset: assets/fonts/Unbounded-700.ttf
           weight: 700
-        - asset: assets/fonts/Nunito-800.ttf
+        - asset: assets/fonts/Unbounded-800.ttf
           weight: 800
 
   assets:
     - assets/icon/icon.png
+    - assets/icon/logo.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:
