@@ -32,13 +32,14 @@ ErrorDocument 404 /404.html
 </IfModule>
 
 <IfModule mod_headers.c>
-  # Картинки, шрифты и движок кэшируем на неделю. Код приложения, index.html
-  # и загрузчик — нет: правило ниже должно идти после общего, иначе после
-  # обновления сайта браузер неделю держит старую версию.
+  # Картинки, шрифты и движок кэшируем на неделю. Код приложения, index.html,
+  # загрузчик и списки ассетов/шрифтов — нет: правило ниже должно идти после
+  # общего, иначе после обновления сайта браузер неделю держит старую версию
+  # (со старым FontManifest.json новый шрифт не подхватывается).
   <FilesMatch "\.(js|wasm|ttf|otf|png|jpg|svg|json)$">
     Header set Cache-Control "public, max-age=604800"
   </FilesMatch>
-  <FilesMatch "^(index\.html|404\.html|main\.dart\.(js|mjs|wasm)|flutter_bootstrap\.js|flutter_service_worker\.js|version\.json|manifest\.json)$">
+  <FilesMatch "^(index\.html|404\.html|main\.dart\.(js|mjs|wasm)|flutter_bootstrap\.js|flutter_service_worker\.js|version\.json|manifest\.json|FontManifest\.json|AssetManifest(\.bin)?(\.json)?)$">
     Header set Cache-Control "no-cache, no-store, must-revalidate"
   </FilesMatch>
   # Нужно для всплывающего окна входа через Google.
