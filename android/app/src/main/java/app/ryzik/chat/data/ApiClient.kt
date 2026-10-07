@@ -1,0 +1,244 @@
+package app.ryzik.chat.data
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
+import okio.source
+import java.io.File
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+
+class ApiException(val status: Int, val code: String, message: String) : IOException(message)
+
+val AppJson = Json {
+    ignoreUnknownKeys = true
+    explicitNulls = false
+    encodeDefaults = true
+}
+
+/** Клиент нашего собственного API (см. server/README.md). */
+class ApiClient(
+    val http: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(5, TimeUnit.MINUTES)
+        .pingInterval(25, TimeUnit.SECONDS)
+        .build(),
+) {
+    @Volatile var baseUrl: String = ""
+    @Volatile var token: String? = null
+
+    private val jsonType = "application/json; charset=utf-8".toMediaType()
+
+    private fun request(path: String): Request.Builder {
+        val b = Request.Builder().url(baseUrl + path)
+        token?.let { b.header("Authorization", "Bearer $it") }
+        return b
+    }
+
+    private suspend fun execute(req: Request): String = withContext(Dispatchers.IO) {
+        val response = http.newCall(req).execute()
+        response.use {
+            val body = it.body?.string().orEmpty()
+            if (!it.isSuccessful) {
+                val err = runCatching { AppJson.decodeFromString(ApiError.serializer(), body) }.getOrNull()
+                throw ApiException(it.code, err?.error ?: "http_${it.code}", err?.message?.ifBlank { null } ?: "Ошибка сети (${it.code})")
+            }
+            body
+        }
+    }
+
+    private suspend fun <T> call(method: String, path: String, body: JsonElement?, ser: KSerializer<T>): T {
+        val rb = body?.toString()?.toRequestBody(jsonType) ?: if (method == "GET" || method == "DELETE") null else "{}".toRequestBody(jsonType)
+        val text = execute(request(path).method(method, rb).build())
+        return AppJson.decodeFromString(ser, text)
+    }
+
+    private suspend fun callUnit(method: String, path: String, body: JsonElement? = null) {
+        val rb = body?.toString()?.toRequestBody(jsonType) ?: if (method == "GET" || method == "DELETE") null else "{}".toRequestBody(jsonType)
+        execute(request(path).method(method, rb).build())
+    }
+
+    // ---------- auth ----------
+
+    suspend fun health(): Boolean = runCatching { execute(request("/api/health").get().build()); true }.getOrDefault(false)
+
+    suspend fun register(username: String, displayName: String, password: String, publicKey: String, encryptedPrivateKey: String, device: String) =
+        call("POST", "/api/auth/register", buildJsonObject {
+            put("username", username)
+            put("displayName", displayName)
+            put("password", password)
+            put("publicKey", publicKey)
+            put("encryptedPrivateKey", encryptedPrivateKey)
+            put("device", device)
+        }, AuthResponse.serializer())
+
+    suspend fun login(username: String, password: String, device: String) =
+        call("POST", "/api/auth/login", buildJsonObject {
+            put("username", username)
+            put("password", password)
+            put("device", device)
+        }, AuthResponse.serializer())
+
+    suspend fun logout() = callUnit("POST", "/api/auth/logout")
+    suspend fun sessions() = call("GET", "/api/sessions", null, ListSerializer(SessionInfo.serializer()))
+    suspend fun terminateOtherSessions() = callUnit("POST", "/api/sessions/terminate-others")
+
+    suspend fun changePassword(oldAuth: String, newAuth: String, encryptedPrivateKey: String) =
+        callUnit("POST", "/api/me/password", buildJsonObject {
+            put("oldPassword", oldAuth)
+            put("newPassword", newAuth)
+            put("encryptedPrivateKey", encryptedPrivateKey)
+        })
+
+    // ---------- users ----------
+
+    suspend fun me() = call("GET", "/api/me", null, User.serializer())
+
+    suspend fun updateMe(displayName: String? = null, bio: String? = null, avatarFileId: String? = null) =
+        call("PATCH", "/api/me", JsonObject(buildMap {
+            displayName?.let { put("displayName", JsonPrimitive(it)) }
+            bio?.let { put("bio", JsonPrimitive(it)) }
+            avatarFileId?.let { put("avatarFileId", JsonPrimitive(it)) }
+        }), User.serializer())
+
+    suspend fun searchUsers(q: String) =
+        call("GET", "/api/users/search?q=" + java.net.URLEncoder.encode(q, "UTF-8"), null, ListSerializer(User.serializer()))
+
+    suspend fun user(id: String) = call("GET", "/api/users/$id", null, User.serializer())
+
+    // ---------- chats ----------
+
+    suspend fun chats() = call("GET", "/api/chats", null, ListSerializer(Chat.serializer()))
+    suspend fun chat(id: String) = call("GET", "/api/chats/$id", null, Chat.serializer())
+
+    suspend fun openDirect(userId: String) =
+        call("POST", "/api/chats/direct", buildJsonObject { put("userId", userId) }, Chat.serializer())
+
+    suspend fun createGroup(title: String, memberIds: List<String>) =
+        call("POST", "/api/chats/group", JsonObject(mapOf(
+            "title" to JsonPrimitive(title),
+            "memberIds" to kotlinx.serialization.json.JsonArray(memberIds.map { JsonPrimitive(it) }),
+        )), Chat.serializer())
+
+    suspend fun updateGroup(chatId: String, title: String? = null, avatarFileId: String? = null) =
+        call("PATCH", "/api/chats/$chatId", JsonObject(buildMap {
+            title?.let { put("title", JsonPrimitive(it)) }
+            avatarFileId?.let { put("avatarFileId", JsonPrimitive(it)) }
+        }), Chat.serializer())
+
+    suspend fun chatSettings(chatId: String, pinned: Boolean? = null, muted: Boolean? = null, archived: Boolean? = null) =
+        call("PATCH", "/api/chats/$chatId/settings", JsonObject(buildMap {
+            pinned?.let { put("pinned", JsonPrimitive(it)) }
+            muted?.let { put("muted", JsonPrimitive(it)) }
+            archived?.let { put("archived", JsonPrimitive(it)) }
+        }), Chat.serializer())
+
+    suspend fun addMembers(chatId: String, userIds: List<String>) =
+        call("POST", "/api/chats/$chatId/members", JsonObject(mapOf(
+            "userIds" to kotlinx.serialization.json.JsonArray(userIds.map { JsonPrimitive(it) }),
+        )), Chat.serializer())
+
+    suspend fun removeMember(chatId: String, userId: String) = callUnit("DELETE", "/api/chats/$chatId/members/$userId")
+
+    suspend fun markRead(chatId: String, seq: Long) =
+        callUnit("POST", "/api/chats/$chatId/read", buildJsonObject { put("seq", seq) })
+
+    suspend fun readState(chatId: String) =
+        call("GET", "/api/chats/$chatId/read-state", null, ListSerializer(ReadState.serializer()))
+
+    // ---------- messages ----------
+
+    suspend fun messages(chatId: String, before: Long? = null, limit: Int = 50) =
+        call("GET", "/api/chats/$chatId/messages?limit=$limit" + (before?.let { "&before=$it" } ?: ""), null,
+            ListSerializer(Message.serializer()))
+
+    suspend fun sendMessage(chatId: String, type: String, payload: String, replyTo: String?, forwardedFrom: String?, clientId: String) =
+        call("POST", "/api/chats/$chatId/messages", JsonObject(buildMap {
+            put("type", JsonPrimitive(type))
+            put("payload", JsonPrimitive(payload))
+            put("clientId", JsonPrimitive(clientId))
+            replyTo?.let { put("replyTo", JsonPrimitive(it)) }
+            forwardedFrom?.let { put("forwardedFrom", JsonPrimitive(it)) }
+        }), Message.serializer())
+
+    suspend fun editMessage(id: String, payload: String) =
+        call("PATCH", "/api/messages/$id", buildJsonObject { put("payload", payload) }, Message.serializer())
+
+    suspend fun deleteMessage(id: String) = call("DELETE", "/api/messages/$id", null, Message.serializer())
+
+    suspend fun react(id: String, emoji: String?) =
+        call("PUT", "/api/messages/$id/reaction", buildJsonObject { put("emoji", emoji ?: "") }, Message.serializer())
+
+    // ---------- files ----------
+
+    suspend fun upload(file: File, mime: String, onProgress: (Float) -> Unit = {}): UploadedFile {
+        val total = file.length().coerceAtLeast(1)
+        val fileBody = object : RequestBody() {
+            override fun contentType() = "application/octet-stream".toMediaType()
+            override fun contentLength() = file.length()
+            override fun writeTo(sink: BufferedSink) {
+                file.source().use { src ->
+                    var sent = 0L
+                    while (true) {
+                        val n = src.read(sink.buffer, 64 * 1024)
+                        if (n < 0) break
+                        sent += n
+                        sink.flush()
+                        onProgress(sent.toFloat() / total)
+                    }
+                }
+            }
+        }
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("mime", mime)
+            .addFormDataPart("file", "blob", fileBody)
+            .build()
+        val text = execute(request("/api/files").post(body).build())
+        return AppJson.decodeFromString(UploadedFile.serializer(), text)
+    }
+
+    suspend fun download(fileId: String, dest: File) = withContext(Dispatchers.IO) {
+        val response = http.newCall(request("/api/files/$fileId").get().build()).execute()
+        response.use {
+            if (!it.isSuccessful) throw ApiException(it.code, "download_failed", "Не удалось скачать файл")
+            val tmp = File(dest.path + ".part")
+            tmp.outputStream().use { out -> it.body!!.byteStream().copyTo(out) }
+            tmp.renameTo(dest)
+        }
+    }
+
+    fun fileUrl(fileId: String) = "$baseUrl/api/files/$fileId"
+
+    // ---------- badges / admin ----------
+
+    suspend fun badges() = call("GET", "/api/badges", null, ListSerializer(Badge.serializer()))
+
+    suspend fun createBadge(emoji: String, title: String, description: String, color: String) =
+        call("POST", "/api/admin/badges", buildJsonObject {
+            put("emoji", emoji)
+            put("title", title)
+            put("description", description)
+            put("color", color)
+        }, Badge.serializer())
+
+    suspend fun deleteBadge(id: String) = callUnit("DELETE", "/api/admin/badges/$id")
+    suspend fun grantBadge(userId: String, badgeId: String) = call("PUT", "/api/admin/users/$userId/badges/$badgeId", null, User.serializer())
+    suspend fun revokeBadge(userId: String, badgeId: String) = call("DELETE", "/api/admin/users/$userId/badges/$badgeId", null, User.serializer())
+    suspend fun setAdmin(userId: String, isAdmin: Boolean) =
+        call("PUT", "/api/admin/users/$userId/admin", buildJsonObject { put("isAdmin", isAdmin) }, User.serializer())
+}

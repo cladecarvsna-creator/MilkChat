@@ -1,0 +1,578 @@
+import express from 'express';
+import multer from 'multer';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { tx } from './db.js';
+
+const now = () => Date.now();
+const newId = () => crypto.randomUUID();
+
+const USERNAME_RE = /^[a-zA-Z0-9_]{3,32}$/;
+const MESSAGE_TYPES = new Set(['text', 'image', 'video', 'file', 'voice', 'sticker']);
+const MAX_PAYLOAD = 64 * 1024;
+
+export class HttpError extends Error {
+  constructor(status, code, message) {
+    super(message ?? code);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password, salt, 64);
+  return `scrypt$${salt.toString('base64')}$${hash.toString('base64')}`;
+}
+
+function verifyPassword(password, stored) {
+  const [, saltB64, hashB64] = stored.split('$');
+  const expected = Buffer.from(hashB64, 'base64');
+  const actual = crypto.scryptSync(password, Buffer.from(saltB64, 'base64'), expected.length);
+  return crypto.timingSafeEqual(expected, actual);
+}
+
+/**
+ * Создаёт express-приложение. `hub` — объект с методами sendToUsers / isOnline
+ * (реализован в realtime.js), через него REST-запросы рассылают события по WebSocket.
+ */
+export function createApp({ db, dataDir, hub, adminUsernames = [] }) {
+  const filesDir = path.join(dataDir, 'files');
+  fs.mkdirSync(filesDir, { recursive: true });
+
+  const app = express();
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '256kb' }));
+
+  // ---------- helpers ----------
+
+  const badgesOf = db.prepare(`
+    SELECT b.id, b.emoji, b.title, b.description, b.color FROM user_badges ub
+    JOIN badges b ON b.id = ub.badge_id WHERE ub.user_id = ? ORDER BY ub.granted_at`);
+
+  function publicUser(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      username: row.username,
+      displayName: row.display_name,
+      bio: row.bio,
+      avatarFileId: row.avatar_file_id ?? null,
+      isAdmin: !!row.is_admin,
+      publicKey: row.public_key,
+      online: hub.isOnline(row.id),
+      lastSeen: row.last_seen,
+      badges: badgesOf.all(row.id),
+    };
+  }
+
+  const getUserRow = db.prepare('SELECT * FROM users WHERE id = ?');
+  const getUser = (id) => publicUser(getUserRow.get(id));
+
+  const memberIdsStmt = db.prepare('SELECT user_id FROM chat_members WHERE chat_id = ?');
+  const memberIds = (chatId) => memberIdsStmt.all(chatId).map((r) => r.user_id);
+
+  const membershipStmt = db.prepare('SELECT * FROM chat_members WHERE chat_id = ? AND user_id = ?');
+
+  function requireMember(chatId, userId) {
+    const m = membershipStmt.get(chatId, userId);
+    if (!m) throw new HttpError(404, 'chat_not_found', 'Чат не найден');
+    return m;
+  }
+
+  const reactionsStmt = db.prepare('SELECT user_id, emoji FROM reactions WHERE message_id = ?');
+
+  function publicMessage(row) {
+    return {
+      id: row.id,
+      chatId: row.chat_id,
+      seq: row.seq,
+      senderId: row.sender_id,
+      type: row.type,
+      payload: row.deleted ? null : row.payload,
+      replyTo: row.reply_to ?? null,
+      forwardedFrom: row.forwarded_from ?? null,
+      clientId: row.client_id ?? null,
+      createdAt: row.created_at,
+      editedAt: row.edited_at ?? null,
+      deleted: !!row.deleted,
+      reactions: row.deleted ? [] : reactionsStmt.all(row.id).map((r) => ({ userId: r.user_id, emoji: r.emoji })),
+    };
+  }
+
+  const lastMessageStmt = db.prepare(
+    'SELECT * FROM messages WHERE chat_id = ? AND deleted = 0 ORDER BY seq DESC LIMIT 1');
+  const unreadStmt = db.prepare(
+    'SELECT COUNT(*) AS n FROM messages WHERE chat_id = ? AND seq > ? AND sender_id != ? AND deleted = 0');
+  const getChatRow = db.prepare('SELECT * FROM chats WHERE id = ?');
+
+  function chatView(chatId, userId) {
+    const chat = getChatRow.get(chatId);
+    const me = membershipStmt.get(chatId, userId);
+    if (!chat || !me) return null;
+    const members = db.prepare('SELECT user_id, role FROM chat_members WHERE chat_id = ?').all(chatId);
+    const last = lastMessageStmt.get(chatId);
+    return {
+      id: chat.id,
+      type: chat.type,
+      title: chat.title,
+      avatarFileId: chat.avatar_file_id ?? null,
+      createdBy: chat.created_by,
+      createdAt: chat.created_at,
+      members: members.map((m) => ({ user: getUser(m.user_id), role: m.role })),
+      lastMessage: last ? publicMessage(last) : null,
+      unread: unreadStmt.get(chatId, me.last_read_seq, userId).n,
+      lastReadSeq: me.last_read_seq,
+      pinned: !!me.pinned,
+      muted: !!me.muted,
+      archived: !!me.archived,
+    };
+  }
+
+  function createChat({ type, title = '', createdBy, members, directKey = null }) {
+    const id = newId();
+    const t = now();
+    db.prepare('INSERT INTO chats (id, type, title, created_by, created_at, direct_key) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(id, type, title, createdBy, t, directKey);
+    const add = db.prepare('INSERT INTO chat_members (chat_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)');
+    for (const m of members) add.run(id, m, m === createdBy ? 'owner' : 'member', t);
+    return id;
+  }
+
+  function broadcastChat(chatId, event) {
+    hub.sendToUsers(memberIds(chatId), event);
+  }
+
+  // ---------- auth ----------
+
+  const sessionStmt = db.prepare('SELECT user_id FROM sessions WHERE token = ?');
+
+  function auth(req, _res, next) {
+    const header = req.get('authorization') ?? '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : req.query.token;
+    const s = token && sessionStmt.get(String(token));
+    if (!s) return next(new HttpError(401, 'unauthorized', 'Нужно войти заново'));
+    req.userId = s.user_id;
+    req.token = String(token);
+    next();
+  }
+
+  function adminOnly(req, _res, next) {
+    const u = getUserRow.get(req.userId);
+    if (!u?.is_admin) return next(new HttpError(403, 'forbidden', 'Только для администраторов'));
+    next();
+  }
+
+  function createSession(userId, device) {
+    const token = crypto.randomBytes(32).toString('base64url');
+    db.prepare('INSERT INTO sessions (token, user_id, device, created_at) VALUES (?, ?, ?, ?)')
+      .run(token, userId, String(device ?? '').slice(0, 100), now());
+    return token;
+  }
+
+  app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'RyzikChat', version: '0.1.0' }));
+
+  app.post('/api/auth/register', (req, res) => {
+    const { username, displayName, password, publicKey, encryptedPrivateKey, device } = req.body ?? {};
+    if (!USERNAME_RE.test(username ?? '')) {
+      throw new HttpError(400, 'bad_username', 'Имя пользователя: 3–32 символа, латиница, цифры и _');
+    }
+    if (typeof password !== 'string' || password.length < 8) throw new HttpError(400, 'bad_password', 'Пароль слишком короткий');
+    if (typeof publicKey !== 'string' || typeof encryptedPrivateKey !== 'string') {
+      throw new HttpError(400, 'bad_keys', 'Нет ключей шифрования');
+    }
+    const name = String(displayName ?? '').trim().slice(0, 64) || username;
+    if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) {
+      throw new HttpError(409, 'username_taken', 'Это имя пользователя уже занято');
+    }
+    const result = tx(db, () => {
+      const id = newId();
+      const first = db.prepare('SELECT COUNT(*) AS n FROM users').get().n === 0;
+      const isAdmin = first || adminUsernames.includes(username.toLowerCase());
+      db.prepare(`INSERT INTO users (id, username, display_name, password_hash, public_key, encrypted_private_key,
+        is_admin, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, username, name, hashPassword(password), publicKey, encryptedPrivateKey, isAdmin ? 1 : 0, now(), now());
+      createChat({ type: 'saved', title: 'Избранное', createdBy: id, members: [id] });
+      return { id, token: createSession(id, device) };
+    });
+    res.status(201).json({ token: result.token, user: getUser(result.id), encryptedPrivateKey });
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    const { username, password, device } = req.body ?? {};
+    const row = db.prepare('SELECT * FROM users WHERE username = ?').get(String(username ?? ''));
+    if (!row || typeof password !== 'string' || !verifyPassword(password, row.password_hash)) {
+      throw new HttpError(401, 'bad_credentials', 'Неверное имя пользователя или пароль');
+    }
+    const token = createSession(row.id, device);
+    res.json({ token, user: publicUser(row), encryptedPrivateKey: row.encrypted_private_key });
+  });
+
+  app.use('/api', auth);
+
+  app.post('/api/auth/logout', (req, res) => {
+    db.prepare('DELETE FROM sessions WHERE token = ?').run(req.token);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/sessions', (req, res) => {
+    const rows = db.prepare('SELECT token, device, created_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC')
+      .all(req.userId);
+    res.json(rows.map((r) => ({
+      id: crypto.createHash('sha256').update(r.token).digest('hex').slice(0, 16),
+      device: r.device,
+      createdAt: r.created_at,
+      current: r.token === req.token,
+    })));
+  });
+
+  app.post('/api/sessions/terminate-others', (req, res) => {
+    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(req.userId, req.token);
+    res.json({ ok: true });
+  });
+
+  // ---------- users ----------
+
+  app.get('/api/me', (req, res) => res.json(getUser(req.userId)));
+
+  app.patch('/api/me', (req, res) => {
+    const { displayName, bio, avatarFileId } = req.body ?? {};
+    if (displayName !== undefined) {
+      const n = String(displayName).trim().slice(0, 64);
+      if (!n) throw new HttpError(400, 'bad_name', 'Имя не может быть пустым');
+      db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(n, req.userId);
+    }
+    if (bio !== undefined) db.prepare('UPDATE users SET bio = ? WHERE id = ?').run(String(bio).slice(0, 300), req.userId);
+    if (avatarFileId !== undefined) {
+      db.prepare('UPDATE users SET avatar_file_id = ? WHERE id = ?').run(avatarFileId || null, req.userId);
+    }
+    const me = getUser(req.userId);
+    hub.broadcastUser(req.userId, { type: 'user.updated', user: me });
+    res.json(me);
+  });
+
+  app.post('/api/me/password', (req, res) => {
+    const { oldPassword, newPassword, encryptedPrivateKey } = req.body ?? {};
+    const row = getUserRow.get(req.userId);
+    if (!verifyPassword(String(oldPassword ?? ''), row.password_hash)) {
+      throw new HttpError(403, 'bad_credentials', 'Старый пароль неверный');
+    }
+    if (typeof newPassword !== 'string' || newPassword.length < 8 || typeof encryptedPrivateKey !== 'string') {
+      throw new HttpError(400, 'bad_password', 'Новый пароль слишком короткий');
+    }
+    db.prepare('UPDATE users SET password_hash = ?, encrypted_private_key = ? WHERE id = ?')
+      .run(hashPassword(newPassword), encryptedPrivateKey, req.userId);
+    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(req.userId, req.token);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/users/search', (req, res) => {
+    const q = String(req.query.q ?? '').trim().replace(/^@/, '');
+    if (!q) return res.json([]);
+    const like = `%${q.replace(/[%_\\]/g, (c) => '\\' + c)}%`;
+    const rows = db.prepare(`SELECT * FROM users WHERE id != ? AND (username LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')
+      ORDER BY username LIMIT 30`).all(req.userId, like, like);
+    res.json(rows.map(publicUser));
+  });
+
+  app.get('/api/users/:id', (req, res) => {
+    const u = getUser(req.params.id);
+    if (!u) throw new HttpError(404, 'user_not_found', 'Пользователь не найден');
+    res.json(u);
+  });
+
+  // ---------- chats ----------
+
+  app.get('/api/chats', (req, res) => {
+    const ids = db.prepare('SELECT chat_id FROM chat_members WHERE user_id = ?').all(req.userId).map((r) => r.chat_id);
+    const chats = ids.map((id) => chatView(id, req.userId)).filter(Boolean);
+    chats.sort((a, b) => (b.lastMessage?.createdAt ?? b.createdAt) - (a.lastMessage?.createdAt ?? a.createdAt));
+    res.json(chats);
+  });
+
+  app.get('/api/chats/:id', (req, res) => {
+    requireMember(req.params.id, req.userId);
+    res.json(chatView(req.params.id, req.userId));
+  });
+
+  app.post('/api/chats/direct', (req, res) => {
+    const other = String(req.body?.userId ?? '');
+    if (other === req.userId) {
+      const saved = db.prepare(`SELECT c.id FROM chats c JOIN chat_members m ON m.chat_id = c.id
+        WHERE c.type = 'saved' AND m.user_id = ?`).get(req.userId);
+      return res.json(chatView(saved.id, req.userId));
+    }
+    if (!getUserRow.get(other)) throw new HttpError(404, 'user_not_found', 'Пользователь не найден');
+    const key = [req.userId, other].sort().join(':');
+    let chat = db.prepare('SELECT id FROM chats WHERE direct_key = ?').get(key);
+    let created = false;
+    if (!chat) {
+      chat = { id: createChat({ type: 'direct', createdBy: req.userId, members: [req.userId, other], directKey: key }) };
+      created = true;
+    }
+    const view = chatView(chat.id, req.userId);
+    if (created) hub.sendToUsers([other], { type: 'chat.new', chat: chatView(chat.id, other) });
+    res.status(created ? 201 : 200).json(view);
+  });
+
+  app.post('/api/chats/group', (req, res) => {
+    const title = String(req.body?.title ?? '').trim().slice(0, 128);
+    if (!title) throw new HttpError(400, 'bad_title', 'Укажите название группы');
+    const ids = [...new Set([req.userId, ...(req.body?.memberIds ?? []).map(String)])]
+      .filter((id) => getUserRow.get(id));
+    const chatId = tx(db, () => createChat({ type: 'group', title, createdBy: req.userId, members: ids }));
+    for (const id of ids) if (id !== req.userId) hub.sendToUsers([id], { type: 'chat.new', chat: chatView(chatId, id) });
+    res.status(201).json(chatView(chatId, req.userId));
+  });
+
+  app.patch('/api/chats/:id', (req, res) => {
+    const m = requireMember(req.params.id, req.userId);
+    const chat = getChatRow.get(req.params.id);
+    const { title, avatarFileId } = req.body ?? {};
+    if (chat.type !== 'group' || m.role !== 'owner') throw new HttpError(403, 'forbidden', 'Только владелец группы');
+    if (title !== undefined) db.prepare('UPDATE chats SET title = ? WHERE id = ?').run(String(title).slice(0, 128), chat.id);
+    if (avatarFileId !== undefined) db.prepare('UPDATE chats SET avatar_file_id = ? WHERE id = ?').run(avatarFileId || null, chat.id);
+    broadcastChat(chat.id, { type: 'chat.updated', chatId: chat.id });
+    res.json(chatView(chat.id, req.userId));
+  });
+
+  app.patch('/api/chats/:id/settings', (req, res) => {
+    requireMember(req.params.id, req.userId);
+    for (const field of ['pinned', 'muted', 'archived']) {
+      if (req.body?.[field] !== undefined) {
+        db.prepare(`UPDATE chat_members SET ${field} = ? WHERE chat_id = ? AND user_id = ?`)
+          .run(req.body[field] ? 1 : 0, req.params.id, req.userId);
+      }
+    }
+    res.json(chatView(req.params.id, req.userId));
+  });
+
+  app.post('/api/chats/:id/members', (req, res) => {
+    const m = requireMember(req.params.id, req.userId);
+    const chat = getChatRow.get(req.params.id);
+    if (chat.type !== 'group' || m.role !== 'owner') throw new HttpError(403, 'forbidden', 'Только владелец группы');
+    const add = db.prepare('INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)');
+    const added = [];
+    for (const id of (req.body?.userIds ?? []).map(String)) {
+      if (getUserRow.get(id) && add.run(chat.id, id, 'member', now()).changes) added.push(id);
+    }
+    for (const id of added) hub.sendToUsers([id], { type: 'chat.new', chat: chatView(chat.id, id) });
+    broadcastChat(chat.id, { type: 'chat.updated', chatId: chat.id });
+    res.json(chatView(chat.id, req.userId));
+  });
+
+  app.delete('/api/chats/:id/members/:userId', (req, res) => {
+    const m = requireMember(req.params.id, req.userId);
+    const chat = getChatRow.get(req.params.id);
+    const target = req.params.userId;
+    if (chat.type !== 'group') throw new HttpError(400, 'not_group', 'Это не группа');
+    if (target !== req.userId && m.role !== 'owner') throw new HttpError(403, 'forbidden', 'Только владелец группы');
+    const before = memberIds(chat.id);
+    db.prepare('DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?').run(chat.id, target);
+    hub.sendToUsers(before, { type: 'chat.updated', chatId: chat.id });
+    hub.sendToUsers([target], { type: 'chat.removed', chatId: chat.id });
+    res.json({ ok: true });
+  });
+
+  app.post('/api/chats/:id/read', (req, res) => {
+    requireMember(req.params.id, req.userId);
+    const seq = Number(req.body?.seq ?? 0);
+    db.prepare('UPDATE chat_members SET last_read_seq = MAX(last_read_seq, ?) WHERE chat_id = ? AND user_id = ?')
+      .run(seq, req.params.id, req.userId);
+    broadcastChat(req.params.id, { type: 'read', chatId: req.params.id, userId: req.userId, seq });
+    res.json({ ok: true });
+  });
+
+  app.get('/api/chats/:id/read-state', (req, res) => {
+    requireMember(req.params.id, req.userId);
+    const rows = db.prepare('SELECT user_id, last_read_seq FROM chat_members WHERE chat_id = ?').all(req.params.id);
+    res.json(rows.map((r) => ({ userId: r.user_id, seq: r.last_read_seq })));
+  });
+
+  // ---------- messages ----------
+
+  app.get('/api/chats/:id/messages', (req, res) => {
+    requireMember(req.params.id, req.userId);
+    const limit = Math.min(Number(req.query.limit ?? 50) || 50, 200);
+    const before = req.query.before ? Number(req.query.before) : Number.MAX_SAFE_INTEGER;
+    const after = req.query.after ? Number(req.query.after) : 0;
+    const rows = db.prepare(`SELECT * FROM messages WHERE chat_id = ? AND seq < ? AND seq > ?
+      ORDER BY seq DESC LIMIT ?`).all(req.params.id, before, after, limit);
+    res.json(rows.reverse().map(publicMessage));
+  });
+
+  app.post('/api/chats/:id/messages', (req, res) => {
+    requireMember(req.params.id, req.userId);
+    const { type = 'text', payload, replyTo, forwardedFrom, clientId } = req.body ?? {};
+    if (!MESSAGE_TYPES.has(type)) throw new HttpError(400, 'bad_type', 'Неизвестный тип сообщения');
+    if (typeof payload !== 'string' || payload.length > MAX_PAYLOAD) {
+      throw new HttpError(400, 'bad_payload', 'Пустое или слишком большое сообщение');
+    }
+    const msg = tx(db, () => {
+      const chat = getChatRow.get(req.params.id);
+      const seq = chat.last_seq + 1;
+      const id = newId();
+      db.prepare('UPDATE chats SET last_seq = ? WHERE id = ?').run(seq, chat.id);
+      db.prepare(`INSERT INTO messages (id, chat_id, seq, sender_id, type, payload, reply_to, forwarded_from, client_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, chat.id, seq, req.userId, type, payload, replyTo ?? null, forwardedFrom ?? null, clientId ?? null, now());
+      db.prepare('UPDATE chat_members SET last_read_seq = ? WHERE chat_id = ? AND user_id = ?').run(seq, chat.id, req.userId);
+      return publicMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id));
+    });
+    broadcastChat(msg.chatId, { type: 'message.new', message: msg });
+    res.status(201).json(msg);
+  });
+
+  const getMessageRow = db.prepare('SELECT * FROM messages WHERE id = ?');
+
+  function requireMessage(id, userId) {
+    const row = getMessageRow.get(id);
+    if (!row) throw new HttpError(404, 'message_not_found', 'Сообщение не найдено');
+    requireMember(row.chat_id, userId);
+    return row;
+  }
+
+  app.patch('/api/messages/:id', (req, res) => {
+    const row = requireMessage(req.params.id, req.userId);
+    if (row.sender_id !== req.userId || row.deleted) throw new HttpError(403, 'forbidden', 'Можно менять только свои сообщения');
+    const { payload } = req.body ?? {};
+    if (typeof payload !== 'string' || payload.length > MAX_PAYLOAD) throw new HttpError(400, 'bad_payload', 'Некорректное сообщение');
+    db.prepare('UPDATE messages SET payload = ?, edited_at = ? WHERE id = ?').run(payload, now(), row.id);
+    const msg = publicMessage(getMessageRow.get(row.id));
+    broadcastChat(row.chat_id, { type: 'message.updated', message: msg });
+    res.json(msg);
+  });
+
+  app.delete('/api/messages/:id', (req, res) => {
+    const row = requireMessage(req.params.id, req.userId);
+    const me = getUserRow.get(req.userId);
+    const member = membershipStmt.get(row.chat_id, req.userId);
+    if (row.sender_id !== req.userId && member.role !== 'owner' && !me.is_admin) {
+      throw new HttpError(403, 'forbidden', 'Нельзя удалить чужое сообщение');
+    }
+    db.prepare("UPDATE messages SET deleted = 1, payload = '' WHERE id = ?").run(row.id);
+    db.prepare('DELETE FROM reactions WHERE message_id = ?').run(row.id);
+    const msg = publicMessage(getMessageRow.get(row.id));
+    broadcastChat(row.chat_id, { type: 'message.updated', message: msg });
+    res.json(msg);
+  });
+
+  app.put('/api/messages/:id/reaction', (req, res) => {
+    const row = requireMessage(req.params.id, req.userId);
+    const emoji = String(req.body?.emoji ?? '').slice(0, 16);
+    if (!emoji) {
+      db.prepare('DELETE FROM reactions WHERE message_id = ? AND user_id = ?').run(row.id, req.userId);
+    } else {
+      db.prepare('INSERT OR REPLACE INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)').run(row.id, req.userId, emoji);
+    }
+    const msg = publicMessage(getMessageRow.get(row.id));
+    broadcastChat(row.chat_id, { type: 'message.updated', message: msg });
+    res.json(msg);
+  });
+
+  // ---------- files ----------
+  // Медиа приходит уже зашифрованным на устройстве: сервер хранит только непрозрачные байты.
+  // Исключение — аватарки, они публичные.
+
+  const upload = multer({
+    storage: multer.diskStorage({
+      destination: filesDir,
+      filename: (_req, _file, cb) => cb(null, newId()),
+    }),
+    limits: { fileSize: Number(process.env.MAX_FILE_MB ?? 2048) * 1024 * 1024 },
+  });
+
+  app.post('/api/files', upload.single('file'), (req, res) => {
+    if (!req.file) throw new HttpError(400, 'no_file', 'Файл не получен');
+    const id = req.file.filename;
+    const mime = String(req.body?.mime ?? req.file.mimetype ?? 'application/octet-stream').slice(0, 100);
+    db.prepare('INSERT INTO files (id, owner_id, size, mime, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(id, req.userId, req.file.size, mime, now());
+    res.status(201).json({ id, size: req.file.size, mime });
+  });
+
+  app.get('/api/files/:id', (req, res) => {
+    const row = db.prepare('SELECT * FROM files WHERE id = ?').get(req.params.id);
+    if (!row) throw new HttpError(404, 'file_not_found', 'Файл не найден');
+    res.type(row.mime);
+    res.set('Cache-Control', 'private, max-age=31536000, immutable');
+    res.sendFile(path.join(filesDir, row.id));
+  });
+
+  // ---------- badges ----------
+
+  const allBadges = () => db.prepare('SELECT id, emoji, title, description, color FROM badges ORDER BY created_at').all();
+
+  app.get('/api/badges', (_req, res) => res.json(allBadges()));
+
+  app.post('/api/admin/badges', adminOnly, (req, res) => {
+    const { emoji, title, description = '', color = '#6750A4' } = req.body ?? {};
+    if (!emoji || !title) throw new HttpError(400, 'bad_badge', 'Нужны эмодзи и название');
+    if (!/^#[0-9a-fA-F]{6}$/.test(color)) throw new HttpError(400, 'bad_color', 'Цвет в формате #RRGGBB');
+    const id = newId();
+    db.prepare('INSERT INTO badges (id, emoji, title, description, color, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(id, String(emoji).slice(0, 16), String(title).slice(0, 40), String(description).slice(0, 200), color, req.userId, now());
+    res.status(201).json(allBadges().find((b) => b.id === id));
+  });
+
+  app.delete('/api/admin/badges/:id', adminOnly, (req, res) => {
+    const holders = db.prepare('SELECT user_id FROM user_badges WHERE badge_id = ?').all(req.params.id).map((r) => r.user_id);
+    db.prepare('DELETE FROM badges WHERE id = ?').run(req.params.id);
+    for (const id of holders) hub.broadcastUser(id, { type: 'user.updated', user: getUser(id) });
+    res.json({ ok: true });
+  });
+
+  app.put('/api/admin/users/:id/badges/:badgeId', adminOnly, (req, res) => {
+    if (!getUserRow.get(req.params.id)) throw new HttpError(404, 'user_not_found', 'Пользователь не найден');
+    if (!db.prepare('SELECT 1 FROM badges WHERE id = ?').get(req.params.badgeId)) {
+      throw new HttpError(404, 'badge_not_found', 'Бейдж не найден');
+    }
+    db.prepare('INSERT OR IGNORE INTO user_badges (user_id, badge_id, granted_by, granted_at) VALUES (?, ?, ?, ?)')
+      .run(req.params.id, req.params.badgeId, req.userId, now());
+    const u = getUser(req.params.id);
+    hub.broadcastUser(u.id, { type: 'user.updated', user: u });
+    res.json(u);
+  });
+
+  app.delete('/api/admin/users/:id/badges/:badgeId', adminOnly, (req, res) => {
+    db.prepare('DELETE FROM user_badges WHERE user_id = ? AND badge_id = ?').run(req.params.id, req.params.badgeId);
+    const u = getUser(req.params.id);
+    if (u) hub.broadcastUser(u.id, { type: 'user.updated', user: u });
+    res.json(u);
+  });
+
+  app.put('/api/admin/users/:id/admin', adminOnly, (req, res) => {
+    if (req.params.id === req.userId && !req.body?.isAdmin) {
+      throw new HttpError(400, 'self_demote', 'Нельзя снять права с самого себя');
+    }
+    db.prepare('UPDATE users SET is_admin = ? WHERE id = ?').run(req.body?.isAdmin ? 1 : 0, req.params.id);
+    const u = getUser(req.params.id);
+    if (!u) throw new HttpError(404, 'user_not_found', 'Пользователь не найден');
+    hub.broadcastUser(u.id, { type: 'user.updated', user: u });
+    res.json(u);
+  });
+
+  // ---------- errors ----------
+
+  app.use('/api', (_req, _res, next) => next(new HttpError(404, 'not_found', 'Нет такого метода')));
+
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, _req, res, _next) => {
+    if (err instanceof HttpError) return res.status(err.status).json({ error: err.code, message: err.message });
+    if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'bad_json', message: 'Некорректный JSON' });
+    if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'too_large', message: 'Файл слишком большой' });
+    console.error(err);
+    res.status(500).json({ error: 'internal', message: 'Ошибка сервера' });
+  });
+
+  // Нужен realtime.js, чтобы собирать события про чат.
+  app.locals.memberIds = memberIds;
+  app.locals.sharedChatPeers = (userId) => db.prepare(`SELECT DISTINCT m2.user_id FROM chat_members m1
+      JOIN chat_members m2 ON m1.chat_id = m2.chat_id WHERE m1.user_id = ?`).all(userId).map((r) => r.user_id);
+  app.locals.resolveToken = (token) => sessionStmt.get(String(token))?.user_id ?? null;
+  app.locals.isMember = (chatId, userId) => !!membershipStmt.get(chatId, userId);
+  app.locals.touchLastSeen = (userId) => db.prepare('UPDATE users SET last_seen = ? WHERE id = ?').run(now(), userId);
+
+  return app;
+}

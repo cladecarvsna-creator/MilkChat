@@ -1,0 +1,747 @@
+package app.ryzik.chat.data
+
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.os.Build
+import android.provider.OpenableColumns
+import app.ryzik.chat.crypto.E2E
+import app.ryzik.chat.crypto.KeyVault
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import okhttp3.Request
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import java.io.File
+import java.io.IOException
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+enum class SendStatus { Sending, Sent, Failed }
+
+/** Сообщение, уже расшифрованное и готовое к показу. */
+data class UiMessage(
+    val id: String,
+    val chatId: String,
+    val seq: Long,
+    val senderId: String,
+    val type: String,
+    val content: Content?,
+    val decryptFailed: Boolean,
+    val replyTo: String?,
+    val forwardedFrom: String?,
+    val createdAt: Long,
+    val editedAt: Long?,
+    val deleted: Boolean,
+    val reactions: List<Reaction>,
+    val clientId: String?,
+    val status: SendStatus = SendStatus.Sent,
+    val uploadProgress: Float? = null,
+    val localFile: File? = null,
+)
+
+sealed interface MediaState {
+    data object Idle : MediaState
+    data class Loading(val progress: Float) : MediaState
+    data class Ready(val file: File) : MediaState
+    data class Error(val message: String) : MediaState
+}
+
+sealed interface AuthState {
+    data object Loading : AuthState
+    data object LoggedOut : AuthState
+    data class LoggedIn(val me: User) : AuthState
+}
+
+class ChatRepository(private val context: Context, val prefs: Prefs) {
+    val api = ApiClient()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    private val _auth = MutableStateFlow<AuthState>(AuthState.Loading)
+    val auth: StateFlow<AuthState> = _auth.asStateFlow()
+
+    private var privateKey: ByteArray? = null
+    val myId: String? get() = (auth.value as? AuthState.LoggedIn)?.me?.id
+
+    private val _chats = MutableStateFlow<List<Chat>>(emptyList())
+    val chats: StateFlow<List<Chat>> = _chats.asStateFlow()
+
+    private val _chatsLoading = MutableStateFlow(false)
+    val chatsLoading: StateFlow<Boolean> = _chatsLoading.asStateFlow()
+
+    private val messageFlows = ConcurrentHashMap<String, MutableStateFlow<List<UiMessage>>>()
+    private val hasMore = ConcurrentHashMap<String, Boolean>()
+    private val decryptCache = ConcurrentHashMap<String, Content?>()
+
+    private val _users = MutableStateFlow<Map<String, User>>(emptyMap())
+    val users: StateFlow<Map<String, User>> = _users.asStateFlow()
+
+    /** chatId -> (userId -> время, до которого показываем «печатает…») */
+    private val _typing = MutableStateFlow<Map<String, Map<String, Long>>>(emptyMap())
+    val typing: StateFlow<Map<String, Map<String, Long>>> = _typing.asStateFlow()
+
+    private val _readStates = MutableStateFlow<Map<String, Map<String, Long>>>(emptyMap())
+    val readStates: StateFlow<Map<String, Map<String, Long>>> = _readStates.asStateFlow()
+
+    private val _connected = MutableStateFlow(false)
+    val connected: StateFlow<Boolean> = _connected.asStateFlow()
+
+    private val _incoming = MutableSharedFlow<Pair<Chat, UiMessage>>(extraBufferCapacity = 32)
+    /** Новые входящие сообщения — для уведомлений. */
+    val incoming: SharedFlow<Pair<Chat, UiMessage>> = _incoming
+
+    private val media = ConcurrentHashMap<String, MutableStateFlow<MediaState>>()
+    private val mediaDir = File(context.cacheDir, "media").apply { mkdirs() }
+
+    @Volatile var openChatId: String? = null
+
+    private var socket: WebSocket? = null
+    private var socketJob: Job? = null
+    private val chatsMutex = Mutex()
+
+    init {
+        scope.launch { restore() }
+        scope.launch {
+            while (true) {
+                delay(1000)
+                val now = System.currentTimeMillis()
+                _typing.update { m -> m.mapValues { (_, v) -> v.filterValues { it > now } }.filterValues { it.isNotEmpty() } }
+            }
+        }
+    }
+
+    // ================= Вход и регистрация =================
+
+    private suspend fun restore() {
+        val s = prefs.session.first()
+        api.baseUrl = s.serverUrl
+        if (s.token == null || s.wrappedPrivateKey == null) {
+            _auth.value = AuthState.LoggedOut
+            return
+        }
+        api.token = s.token
+        privateKey = runCatching { KeyVault.unwrap(s.wrappedPrivateKey) }.getOrNull()
+        if (privateKey == null) {
+            prefs.clearSession()
+            _auth.value = AuthState.LoggedOut
+            return
+        }
+        val me = runCatching { api.me() }.getOrElse { e ->
+            if (e is ApiException && e.status == 401) {
+                prefs.clearSession()
+                _auth.value = AuthState.LoggedOut
+                return
+            }
+            // Нет сети: пускаем в приложение с минимальными данными, всё догрузится позже.
+            User(id = s.userId ?: "", username = s.username ?: "", displayName = s.username ?: "")
+        }
+        onLoggedIn(me)
+    }
+
+    private fun deviceName() = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+
+    suspend fun setServer(url: String) {
+        val clean = url.trim().trimEnd('/')
+        prefs.setServer(clean)
+        api.baseUrl = clean
+    }
+
+    suspend fun checkServer(): Boolean = api.health()
+
+    suspend fun register(username: String, displayName: String, password: String) = withContext(Dispatchers.Default) {
+        val keys = E2E.derivePasswordKeys(username, password)
+        val kp = E2E.generateKeyPair()
+        val res = api.register(
+            username = username,
+            displayName = displayName,
+            password = keys.authKey,
+            publicKey = E2E.b64(kp.publicKey),
+            encryptedPrivateKey = E2E.sealPrivateKey(kp.privateKey, keys.vaultKey),
+            device = deviceName(),
+        )
+        finishAuth(res, kp.privateKey)
+    }
+
+    suspend fun login(username: String, password: String) = withContext(Dispatchers.Default) {
+        val keys = E2E.derivePasswordKeys(username, password)
+        val res = api.login(username, keys.authKey, deviceName())
+        val priv = runCatching { E2E.openPrivateKey(res.encryptedPrivateKey, keys.vaultKey) }
+            .getOrElse { throw IOException("Не удалось расшифровать ключи аккаунта") }
+        finishAuth(res, priv)
+    }
+
+    private suspend fun finishAuth(res: AuthResponse, priv: ByteArray) {
+        api.token = res.token
+        privateKey = priv
+        prefs.saveSession(res.token, res.user.id, res.user.username, KeyVault.wrap(priv))
+        onLoggedIn(res.user)
+    }
+
+    private fun onLoggedIn(me: User) {
+        rememberUsers(listOf(me))
+        _auth.value = AuthState.LoggedIn(me)
+        scope.launch { refreshChats() }
+        connectSocket()
+    }
+
+    suspend fun changePassword(old: String, new: String) = withContext(Dispatchers.Default) {
+        val me = (auth.value as AuthState.LoggedIn).me
+        val oldKeys = E2E.derivePasswordKeys(me.username, old)
+        val newKeys = E2E.derivePasswordKeys(me.username, new)
+        api.changePassword(oldKeys.authKey, newKeys.authKey, E2E.sealPrivateKey(privateKey!!, newKeys.vaultKey))
+    }
+
+    fun logout() {
+        scope.launch {
+            runCatching { api.logout() }
+            resetLocal()
+        }
+    }
+
+    private suspend fun resetLocal() {
+        socketJob?.cancel()
+        socket?.close(1000, null)
+        socket = null
+        prefs.clearSession()
+        api.token = null
+        privateKey = null
+        _chats.value = emptyList()
+        messageFlows.clear()
+        decryptCache.clear()
+        _users.value = emptyMap()
+        _auth.value = AuthState.LoggedOut
+    }
+
+    fun myFingerprint(): String = privateKey?.let { E2E.fingerprint(E2E.publicFromPrivate(it)) } ?: ""
+
+    fun fingerprintOf(user: User): String = runCatching { E2E.fingerprint(E2E.unb64(user.publicKey)) }.getOrDefault("—")
+
+    // ================= Пользователи =================
+
+    private fun rememberUsers(list: List<User>) {
+        if (list.isEmpty()) return
+        _users.update { m -> m + list.associateBy { it.id } }
+        val me = (auth.value as? AuthState.LoggedIn)?.me
+        list.firstOrNull { it.id == me?.id }?.let { _auth.value = AuthState.LoggedIn(it) }
+    }
+
+    suspend fun searchUsers(q: String): List<User> = api.searchUsers(q).also { rememberUsers(it) }
+
+    suspend fun loadUser(id: String): User = api.user(id).also { rememberUsers(listOf(it)) }
+
+    suspend fun updateProfile(displayName: String? = null, bio: String? = null, avatarFileId: String? = null) {
+        rememberUsers(listOf(api.updateMe(displayName, bio, avatarFileId)))
+    }
+
+    /** Аватарки не шифруются: их видят все, как и имя. */
+    suspend fun uploadAvatar(uri: Uri): String = withContext(Dispatchers.IO) {
+        val tmp = File(context.cacheDir, "avatar_${UUID.randomUUID()}")
+        context.contentResolver.openInputStream(uri)!!.use { input -> tmp.outputStream().use { input.copyTo(it) } }
+        try {
+            api.upload(tmp, context.contentResolver.getType(uri) ?: "image/jpeg").id
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    fun avatarUrl(fileId: String?) = fileId?.let { api.fileUrl(it) }
+
+    // ================= Чаты =================
+
+    suspend fun refreshChats() {
+        _chatsLoading.value = true
+        try {
+            val list = api.chats()
+            rememberUsers(list.flatMap { c -> c.members.map { it.user } })
+            chatsMutex.withLock { _chats.value = sortChats(list) }
+        } catch (_: Exception) {
+        } finally {
+            _chatsLoading.value = false
+        }
+    }
+
+    private fun sortChats(list: List<Chat>) = list.sortedWith(
+        compareByDescending<Chat> { it.pinned }.thenByDescending { it.lastMessage?.createdAt ?: it.createdAt }
+    )
+
+    private suspend fun upsertChat(chat: Chat) {
+        rememberUsers(chat.members.map { it.user })
+        chatsMutex.withLock {
+            _chats.value = sortChats(_chats.value.filterNot { it.id == chat.id } + chat)
+        }
+    }
+
+    fun chat(id: String): Chat? = _chats.value.firstOrNull { it.id == id }
+
+    suspend fun loadChat(id: String): Chat = api.chat(id).also { upsertChat(it) }
+
+    fun chatTitle(chat: Chat): String = when (chat.type) {
+        "saved" -> "Избранное"
+        "direct" -> peerOf(chat)?.displayName ?: "Чат"
+        else -> chat.title
+    }
+
+    fun peerOf(chat: Chat): User? {
+        if (chat.type != "direct") return null
+        val id = chat.members.firstOrNull { it.user.id != myId }?.user?.id ?: return null
+        return _users.value[id] ?: chat.members.first { it.user.id == id }.user
+    }
+
+    suspend fun openDirect(userId: String): Chat = api.openDirect(userId).also { upsertChat(it) }
+
+    suspend fun createGroup(title: String, memberIds: List<String>): Chat = api.createGroup(title, memberIds).also { upsertChat(it) }
+
+    suspend fun renameGroup(chatId: String, title: String) = upsertChat(api.updateGroup(chatId, title = title))
+
+    suspend fun addMembers(chatId: String, ids: List<String>) = upsertChat(api.addMembers(chatId, ids))
+
+    suspend fun removeMember(chatId: String, userId: String) {
+        api.removeMember(chatId, userId)
+        if (userId == myId) _chats.update { l -> l.filterNot { it.id == chatId } } else upsertChat(api.chat(chatId))
+    }
+
+    suspend fun setPinned(chatId: String, pinned: Boolean) = upsertChat(api.chatSettings(chatId, pinned = pinned))
+    suspend fun setMuted(chatId: String, muted: Boolean) = upsertChat(api.chatSettings(chatId, muted = muted))
+    suspend fun setArchived(chatId: String, archived: Boolean) = upsertChat(api.chatSettings(chatId, archived = archived))
+
+    fun savedChat(): Chat? = _chats.value.firstOrNull { it.type == "saved" }
+
+    // ================= Сообщения =================
+
+    fun messagesOf(chatId: String): StateFlow<List<UiMessage>> =
+        messageFlows.getOrPut(chatId) { MutableStateFlow(emptyList()) }
+
+    fun canLoadMore(chatId: String) = hasMore[chatId] != false
+
+    suspend fun loadLatest(chatId: String) {
+        val list = api.messages(chatId, limit = 50)
+        if (!hasMore.containsKey(chatId)) hasMore[chatId] = list.size >= 50
+        merge(chatId, list.map { decrypt(it) })
+        loadReadState(chatId)
+    }
+
+    suspend fun loadOlder(chatId: String) {
+        if (!canLoadMore(chatId)) return
+        val first = messagesOf(chatId).value.firstOrNull { it.status == SendStatus.Sent }?.seq ?: return
+        val list = api.messages(chatId, before = first, limit = 50)
+        hasMore[chatId] = list.size >= 50
+        merge(chatId, list.map { decrypt(it) })
+    }
+
+    private suspend fun loadReadState(chatId: String) {
+        runCatching { api.readState(chatId) }.onSuccess { list ->
+            _readStates.update { it + (chatId to list.associate { r -> r.userId to r.seq }) }
+        }
+    }
+
+    private fun merge(chatId: String, incoming: List<UiMessage>) {
+        val flow = messageFlows.getOrPut(chatId) { MutableStateFlow(emptyList()) }
+        flow.update { current ->
+            val byId = LinkedHashMap<String, UiMessage>()
+            current.forEach { byId[it.id] = it }
+            for (m in incoming) {
+                // Серверная версия заменяет «отправляется…» с тем же clientId
+                m.clientId?.let { cid -> byId.values.firstOrNull { it.status != SendStatus.Sent && it.clientId == cid }?.let { p -> byId.remove(p.id) } }
+                val old = byId[m.id]
+                byId[m.id] = if (old?.localFile != null && m.localFile == null) m.copy(localFile = old.localFile) else m
+            }
+            byId.values.sortedWith(compareBy<UiMessage> { if (it.status == SendStatus.Sent) 0 else 1 }.thenBy { it.seq }.thenBy { it.createdAt })
+        }
+    }
+
+    private fun decrypt(m: Message): UiMessage {
+        val key = "${m.id}:${m.editedAt ?: 0}"
+        val content: Content? = when {
+            m.deleted || m.payload.isNullOrEmpty() -> null
+            decryptCache.containsKey(key) -> decryptCache[key]
+            else -> {
+                val c = runCatching {
+                    val plain = E2E.decrypt(m.payload, myId!!, privateKey!!)
+                    AppJson.decodeFromString(Content.serializer(), plain)
+                }.getOrNull()
+                decryptCache[key] = c
+                c
+            }
+        }
+        return UiMessage(
+            id = m.id, chatId = m.chatId, seq = m.seq, senderId = m.senderId, type = m.type,
+            content = content, decryptFailed = !m.deleted && content == null,
+            replyTo = m.replyTo, forwardedFrom = m.forwardedFrom, createdAt = m.createdAt, editedAt = m.editedAt,
+            deleted = m.deleted, reactions = m.reactions, clientId = m.clientId,
+        )
+    }
+
+    fun previewOf(m: Message?): String {
+        if (m == null) return ""
+        if (m.deleted) return "Сообщение удалено"
+        val c = decrypt(m).content ?: return "🔒 Зашифрованное сообщение"
+        return previewText(m.type, c)
+    }
+
+    fun previewText(type: String, c: Content): String = when (type) {
+        "image" -> "🖼 Фото" + c.text.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+        "video" -> "🎬 Видео" + c.text.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+        "file" -> "📎 ${c.file?.name ?: "Файл"}"
+        "voice" -> "🎤 Голосовое"
+        else -> c.text
+    }
+
+    private fun recipientsOf(chatId: String): Map<String, ByteArray> {
+        val chat = chat(chatId) ?: return emptyMap()
+        val out = HashMap<String, ByteArray>()
+        for (m in chat.members) {
+            val u = _users.value[m.user.id] ?: m.user
+            if (u.publicKey.isNotEmpty()) out[u.id] = E2E.unb64(u.publicKey)
+        }
+        // Себе — всегда, чтобы видеть свои сообщения на других устройствах.
+        privateKey?.let { out[myId!!] = E2E.publicFromPrivate(it) }
+        return out
+    }
+
+    private fun encryptFor(chatId: String, content: Content): String =
+        E2E.encrypt(AppJson.encodeToString(Content.serializer(), content), recipientsOf(chatId))
+
+    fun sendText(chatId: String, text: String, replyTo: String? = null) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        sendContent(chatId, "text", Content(text = trimmed), replyTo, null)
+    }
+
+    private fun sendContent(chatId: String, type: String, content: Content, replyTo: String?, forwardedFrom: String?, pendingId: String? = null) {
+        val clientId = pendingId ?: UUID.randomUUID().toString()
+        if (pendingId == null) merge(chatId, listOf(pending(chatId, clientId, type, content, replyTo, forwardedFrom)))
+        scope.launch {
+            try {
+                val sent = api.sendMessage(chatId, type, encryptFor(chatId, content), replyTo, forwardedFrom, clientId)
+                decryptCache["${sent.id}:0"] = content
+                merge(chatId, listOf(decrypt(sent)))
+                bumpChat(sent)
+            } catch (_: Exception) {
+                markFailed(chatId, clientId)
+            }
+        }
+    }
+
+    private fun pending(chatId: String, clientId: String, type: String, content: Content, replyTo: String?, forwardedFrom: String?, local: File? = null) =
+        UiMessage(
+            id = "pending:$clientId", chatId = chatId, seq = Long.MAX_VALUE, senderId = myId ?: "", type = type,
+            content = content, decryptFailed = false, replyTo = replyTo, forwardedFrom = forwardedFrom,
+            createdAt = System.currentTimeMillis(), editedAt = null, deleted = false, reactions = emptyList(),
+            clientId = clientId, status = SendStatus.Sending, localFile = local,
+        )
+
+    private fun markFailed(chatId: String, clientId: String) {
+        messageFlows[chatId]?.update { l -> l.map { if (it.clientId == clientId && it.status != SendStatus.Sent) it.copy(status = SendStatus.Failed, uploadProgress = null) else it } }
+    }
+
+    private fun setProgress(chatId: String, clientId: String, p: Float) {
+        messageFlows[chatId]?.update { l -> l.map { if (it.clientId == clientId && it.status == SendStatus.Sending) it.copy(uploadProgress = p) else it } }
+    }
+
+    fun retry(msg: UiMessage) {
+        val c = msg.content ?: return
+        messageFlows[msg.chatId]?.update { l -> l.map { if (it.id == msg.id) it.copy(status = SendStatus.Sending) else it } }
+        if (msg.localFile != null && c.file?.id.isNullOrEmpty()) {
+            uploadAndSend(msg.chatId, msg.type, msg.localFile, c, msg.replyTo, msg.clientId!!)
+        } else {
+            sendContent(msg.chatId, msg.type, c, msg.replyTo, msg.forwardedFrom, msg.clientId)
+        }
+    }
+
+    fun discard(msg: UiMessage) {
+        messageFlows[msg.chatId]?.update { l -> l.filterNot { it.id == msg.id } }
+    }
+
+    /** Отправка фото, видео или любого файла. Файл шифруется на устройстве ещё до загрузки. */
+    fun sendFile(chatId: String, uri: Uri, caption: String, asType: String? = null, replyTo: String? = null) {
+        scope.launch {
+            val cr = context.contentResolver
+            val mime = cr.getType(uri) ?: "application/octet-stream"
+            var name = "file"
+            var size = 0L
+            cr.query(uri, null, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    c.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { name = c.getString(it) ?: name }
+                    c.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 }?.let { size = c.getLong(it) }
+                }
+            }
+            val type = asType ?: when {
+                mime.startsWith("image/") && !mime.contains("svg") -> "image"
+                mime.startsWith("video/") -> "video"
+                else -> "file"
+            }
+            val clientId = UUID.randomUUID().toString()
+            // Копия оригинала: показываем её сразу и не скачиваем потом своё же фото.
+            val local = File(mediaDir, "local_$clientId")
+            withContext(Dispatchers.IO) { cr.openInputStream(uri)!!.use { i -> local.outputStream().use { i.copyTo(it) } } }
+            if (size <= 0) size = local.length()
+            var w = 0
+            var h = 0
+            var duration = 0L
+            if (type == "image") {
+                val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(local.path, o)
+                w = o.outWidth; h = o.outHeight
+            } else if (type == "video") {
+                runCatching {
+                    val r = MediaMetadataRetriever()
+                    r.setDataSource(local.path)
+                    w = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toInt() ?: 0
+                    h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toInt() ?: 0
+                    val rot = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toInt() ?: 0
+                    if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
+                    duration = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0
+                    r.release()
+                }
+            }
+            val content = Content(text = caption.trim(), file = FileRef(id = "", key = "", name = name, size = size, mime = mime, width = w, height = h, durationMs = duration))
+            merge(chatId, listOf(pending(chatId, clientId, type, content, replyTo, null, local)))
+            uploadAndSend(chatId, type, local, content, replyTo, clientId)
+        }
+    }
+
+    private fun uploadAndSend(chatId: String, type: String, local: File, content: Content, replyTo: String?, clientId: String) {
+        scope.launch(Dispatchers.IO) {
+            val enc = File(context.cacheDir, "enc_$clientId")
+            try {
+                val total = local.length().coerceAtLeast(1)
+                val key = local.inputStream().use { input ->
+                    enc.outputStream().use { out -> E2E.encryptFile(input, out) { setProgress(chatId, clientId, 0.1f * it / total) } }
+                }
+                val up = api.upload(enc, "application/octet-stream") { setProgress(chatId, clientId, 0.1f + 0.9f * it) }
+                // Отправленный файл уже лежит у нас в расшифрованном виде.
+                val ready = File(mediaDir, up.id)
+                local.copyTo(ready, overwrite = true)
+                media.getOrPut(up.id) { MutableStateFlow(MediaState.Idle) }.value = MediaState.Ready(ready)
+                val finalContent = content.copy(file = content.file!!.copy(id = up.id, key = key))
+                val sent = api.sendMessage(chatId, type, encryptFor(chatId, finalContent), replyTo, null, clientId)
+                decryptCache["${sent.id}:0"] = finalContent
+                merge(chatId, listOf(decrypt(sent).copy(localFile = ready)))
+                bumpChat(sent)
+                local.delete()
+            } catch (_: Exception) {
+                markFailed(chatId, clientId)
+            } finally {
+                enc.delete()
+            }
+        }
+    }
+
+    suspend fun editMessage(msg: UiMessage, newText: String) {
+        val c = (msg.content ?: return).copy(text = newText.trim())
+        val updated = api.editMessage(msg.id, encryptFor(msg.chatId, c))
+        decryptCache["${updated.id}:${updated.editedAt ?: 0}"] = c
+        merge(msg.chatId, listOf(decrypt(updated)))
+    }
+
+    suspend fun deleteMessage(msg: UiMessage) {
+        if (msg.status != SendStatus.Sent) return discard(msg)
+        merge(msg.chatId, listOf(decrypt(api.deleteMessage(msg.id))))
+    }
+
+    suspend fun react(msg: UiMessage, emoji: String) {
+        val mine = msg.reactions.firstOrNull { it.userId == myId }?.emoji
+        val updated = api.react(msg.id, if (mine == emoji) null else emoji)
+        merge(msg.chatId, listOf(decrypt(updated)))
+    }
+
+    /** Пересылка: перешифровываем содержимое для участников другого чата. */
+    fun forward(msg: UiMessage, toChatId: String) {
+        val c = msg.content ?: return
+        sendContent(toChatId, msg.type, c, null, msg.forwardedFrom ?: msg.senderId)
+    }
+
+    fun saveToFavorites(msg: UiMessage) {
+        savedChat()?.let { forward(msg, it.id) }
+    }
+
+    fun markRead(chatId: String) {
+        val last = messagesOf(chatId).value.lastOrNull { it.status == SendStatus.Sent } ?: return
+        val chat = chat(chatId) ?: return
+        if (chat.lastReadSeq >= last.seq && chat.unread == 0) return
+        _chats.update { l -> l.map { if (it.id == chatId) it.copy(unread = 0, lastReadSeq = last.seq) else it } }
+        scope.launch { runCatching { api.markRead(chatId, last.seq) } }
+    }
+
+    private suspend fun bumpChat(m: Message) {
+        val existing = chat(m.chatId)
+        if (existing == null) {
+            runCatching { loadChat(m.chatId) }
+            return
+        }
+        val mine = m.senderId == myId
+        val unread = when {
+            mine -> 0
+            openChatId == m.chatId -> 0
+            else -> existing.unread + 1
+        }
+        upsertChat(existing.copy(lastMessage = m, unread = unread, lastReadSeq = if (mine) m.seq else existing.lastReadSeq))
+    }
+
+    // ================= Медиа =================
+
+    fun mediaState(fileId: String): StateFlow<MediaState> {
+        val flow = media.getOrPut(fileId) { MutableStateFlow(MediaState.Idle) }
+        if (flow.value == MediaState.Idle) {
+            val f = File(mediaDir, fileId)
+            if (f.exists()) flow.value = MediaState.Ready(f)
+        }
+        return flow
+    }
+
+    fun download(ref: FileRef) {
+        if (ref.id.isEmpty()) return
+        val flow = media.getOrPut(ref.id) { MutableStateFlow(MediaState.Idle) }
+        if (flow.value is MediaState.Loading || flow.value is MediaState.Ready) return
+        flow.value = MediaState.Loading(0f)
+        scope.launch(Dispatchers.IO) {
+            val enc = File(context.cacheDir, "dl_${ref.id}")
+            val out = File(mediaDir, ref.id)
+            try {
+                api.download(ref.id, enc)
+                flow.value = MediaState.Loading(0.9f)
+                val tmp = File(out.path + ".tmp")
+                tmp.outputStream().use { E2E.decryptFile(enc, ref.key, it) }
+                tmp.renameTo(out)
+                flow.value = MediaState.Ready(out)
+            } catch (e: Exception) {
+                flow.value = MediaState.Error(e.message ?: "Ошибка")
+            } finally {
+                enc.delete()
+            }
+        }
+    }
+
+    fun cacheSize(): Long = (mediaDir.listFiles()?.sumOf { it.length() } ?: 0L)
+
+    fun clearCache() {
+        mediaDir.listFiles()?.forEach { it.delete() }
+        media.clear()
+    }
+
+    // ================= Админка и бейджи =================
+
+    suspend fun badges() = api.badges()
+    suspend fun createBadge(emoji: String, title: String, description: String, color: String) = api.createBadge(emoji, title, description, color)
+    suspend fun deleteBadge(id: String) = api.deleteBadge(id)
+    suspend fun grantBadge(userId: String, badgeId: String) = api.grantBadge(userId, badgeId).also { rememberUsers(listOf(it)) }
+    suspend fun revokeBadge(userId: String, badgeId: String) = api.revokeBadge(userId, badgeId).also { rememberUsers(listOf(it)) }
+    suspend fun setAdmin(userId: String, isAdmin: Boolean) = api.setAdmin(userId, isAdmin).also { rememberUsers(listOf(it)) }
+
+    // ================= Реальное время =================
+
+    fun sendTyping(chatId: String) {
+        socket?.send("""{"type":"typing","chatId":"$chatId"}""")
+    }
+
+    private fun connectSocket() {
+        socketJob?.cancel()
+        socketJob = scope.launch {
+            var backoff = 1000L
+            while (auth.value is AuthState.LoggedIn) {
+                val closed = kotlinx.coroutines.CompletableDeferred<Unit>()
+                val wsUrl = api.baseUrl.replaceFirst("http", "ws") + "/ws?token=" + api.token
+                val ws = api.http.newWebSocket(Request.Builder().url(wsUrl).build(), object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                        _connected.value = true
+                        backoff = 1000L
+                        scope.launch { resync() }
+                    }
+
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        val ev = runCatching { AppJson.decodeFromString(RealtimeEvent.serializer(), text) }.getOrNull() ?: return
+                        scope.launch { handle(ev) }
+                    }
+
+                    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                        webSocket.close(code, reason)
+                        if (code == 4001) scope.launch { resetLocal() }
+                    }
+
+                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                        _connected.value = false
+                        closed.complete(Unit)
+                    }
+
+                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
+                        _connected.value = false
+                        closed.complete(Unit)
+                    }
+                })
+                socket = ws
+                try {
+                    closed.await()
+                } finally {
+                    if (!closed.isCompleted) ws.cancel()
+                }
+                delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(30_000)
+            }
+        }
+    }
+
+    private suspend fun resync() {
+        refreshChats()
+        for (id in messageFlows.keys) runCatching { loadLatest(id) }
+    }
+
+    private suspend fun handle(ev: RealtimeEvent) {
+        when (ev.type) {
+            "message.new" -> {
+                val m = ev.message ?: return
+                val ui = decrypt(m)
+                merge(m.chatId, listOf(ui))
+                bumpChat(m)
+                if (m.senderId != myId) {
+                    _typing.update { t -> t + (m.chatId to (t[m.chatId].orEmpty() - m.senderId)) }
+                    chat(m.chatId)?.let { _incoming.tryEmit(it to ui) }
+                }
+            }
+            "message.updated" -> {
+                val m = ev.message ?: return
+                merge(m.chatId, listOf(decrypt(m)))
+                val c = chat(m.chatId)
+                if (c?.lastMessage?.id == m.id) upsertChat(c.copy(lastMessage = m))
+            }
+            "chat.new" -> ev.chat?.let { upsertChat(it) }
+            "chat.updated" -> ev.chatId?.let { id -> runCatching { loadChat(id) } }
+            "chat.removed" -> ev.chatId?.let { id -> _chats.update { l -> l.filterNot { it.id == id } } }
+            "typing" -> {
+                val chatId = ev.chatId ?: return
+                val userId = ev.userId ?: return
+                _typing.update { t -> t + (chatId to (t[chatId].orEmpty() + (userId to System.currentTimeMillis() + 5000))) }
+            }
+            "read" -> {
+                val chatId = ev.chatId ?: return
+                val userId = ev.userId ?: return
+                _readStates.update { it + (chatId to (it[chatId].orEmpty() + (userId to (ev.seq ?: 0)))) }
+            }
+            "presence" -> {
+                val id = ev.userId ?: return
+                _users.update { m -> m[id]?.let { u -> m + (id to u.copy(online = ev.online == true, lastSeen = ev.lastSeen ?: u.lastSeen)) } ?: m }
+            }
+            "user.updated" -> ev.user?.let { rememberUsers(listOf(it)) }
+        }
+    }
+}
+
+fun Throwable.userMessage(): String = when (this) {
+    is ApiException -> message ?: "Ошибка"
+    is IOException -> message?.takeIf { it.any { ch -> ch in 'а'..'я' || ch in 'А'..'Я' } } ?: "Нет связи с сервером"
+    else -> message ?: "Что-то пошло не так"
+}

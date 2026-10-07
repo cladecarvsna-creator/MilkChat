@@ -1,0 +1,55 @@
+name: Сборка
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  server:
+    name: Сервер (тесты)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+
+  android:
+    name: Android (APK)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Тесты шифрования
+        run: ./gradlew testDebugUnitTest --stacktrace
+      - name: Сборка APK
+        run: ./gradlew assembleRelease --stacktrace
+      - name: Переименовать APK
+        run: cp app/build/outputs/apk/release/app-release.apk RyzikChat.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RyzikChat-apk
+          path: android/RyzikChat.apk
+      - name: Релиз (для тегов v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android/RyzikChat.apk
