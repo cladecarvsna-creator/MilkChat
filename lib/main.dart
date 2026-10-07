@@ -1,5 +1,7 @@
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -11,6 +13,7 @@ import 'theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final fonts = kIsWeb ? _loadWebFonts() : Future<void>.value();
   final prefs = await SharedPreferences.getInstance();
   try {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
@@ -19,6 +22,7 @@ Future<void> main() async {
     runApp(_FirebaseMissing(error: '$e'));
     return;
   }
+  await fonts;
 
   runApp(
     MultiProvider(
@@ -29,6 +33,21 @@ Future<void> main() async {
       child: const MilkChatApp(),
     ),
   );
+}
+
+/// На вебе хостинг может отдавать старый assets/FontManifest.json из своего
+/// кэша, и тогда движок не знает про Unbounded и рисует стандартным шрифтом.
+/// Поэтому регистрируем шрифт сами, прямо из файлов, без этого списка.
+Future<void> _loadWebFonts() async {
+  try {
+    final loader = FontLoader('Unbounded');
+    for (final w in const [400, 500, 600, 700, 800]) {
+      loader.addFont(rootBundle.load('assets/fonts/Unbounded-$w.ttf'));
+    }
+    await loader.load();
+  } catch (e) {
+    debugPrint('Шрифт Unbounded не загрузился: $e');
+  }
 }
 
 class _FirebaseMissing extends StatelessWidget {
