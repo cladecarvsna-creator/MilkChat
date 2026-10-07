@@ -1,5 +1,9 @@
 package app.ryzik.chat.ui.chats
 
+import androidx.compose.material3.Surface
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
@@ -38,6 +42,7 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PushPin
@@ -89,13 +94,15 @@ import app.ryzik.chat.ui.components.formatListTime
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private enum class Filter(val title: String) { All("Все"), Unread("Непрочитанные"), Personal("Личные"), Groups("Группы") }
+private enum class Filter(val title: String) { All("Все"), Unread("Непрочитанные"), Personal("Личные"), Groups("Группы"), Channels("Каналы") }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ChatListScreen(
     onOpenChat: (String) -> Unit,
     onNewChat: () -> Unit,
+    onNewGroup: () -> Unit,
+    onNewChannel: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenProfile: (String) -> Unit,
 ) {
@@ -114,6 +121,8 @@ fun ChatListScreen(
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var foundUsers by remember { mutableStateOf<List<User>>(emptyList()) }
+    var foundChannels by remember { mutableStateOf<List<Chat>>(emptyList()) }
+    var fabOpen by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf(Filter.All) }
     var showArchive by remember { mutableStateOf(false) }
     var menuChat by remember { mutableStateOf<Chat?>(null) }
@@ -122,6 +131,7 @@ fun ChatListScreen(
         if (query.length < 2) { foundUsers = emptyList(); return@LaunchedEffect }
         delay(300)
         foundUsers = runCatching { repo.searchUsers(query) }.getOrDefault(emptyList())
+        foundChannels = runCatching { repo.searchChannels(query) }.getOrDefault(emptyList()).filter { c -> chats.none { it.id == c.id && it.myRole != null } }
     }
 
     val listState = rememberLazyListState()
@@ -131,13 +141,15 @@ fun ChatListScreen(
     val archivedCount = chats.count { it.archived }
     val visible = chats.filter { c ->
         val title = repo.chatTitle(c)
+        !(c.type == "channel" && c.myRole == null) &&
         (if (showArchive) c.archived else !c.archived) &&
             (query.isBlank() || title.contains(query, ignoreCase = true)) &&
             when (filter) {
                 Filter.All -> true
                 Filter.Unread -> c.unread > 0
-                Filter.Personal -> c.type != "group"
+                Filter.Personal -> c.type == "direct" || c.type == "saved"
                 Filter.Groups -> c.type == "group"
+                Filter.Channels -> c.type == "channel"
             }
     }
 
@@ -205,11 +217,15 @@ fun ChatListScreen(
         },
         floatingActionButton = {
             AnimatedVisibility(!searching, enter = scaleIn(spring(Spring.DampingRatioMediumBouncy)), exit = scaleOut()) {
-                ExtendedFloatingActionButton(
-                    onClick = onNewChat,
+                SpeedDial(
+                    open = fabOpen,
                     expanded = expandedFab,
-                    icon = { Icon(Icons.Default.Edit, null) },
-                    text = { Text("Новый чат") },
+                    onToggle = { fabOpen = !fabOpen },
+                    items = listOf(
+                        DialItem("Новый канал", Icons.Default.Campaign) { fabOpen = false; onNewChannel() },
+                        DialItem("Новая группа", Icons.Default.Group) { fabOpen = false; onNewGroup() },
+                        DialItem("Новый чат", Icons.Default.Person) { fabOpen = false; onNewChat() },
+                    ),
                 )
             }
         },
@@ -263,7 +279,7 @@ fun ChatListScreen(
                             headlineContent = {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(u.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    BadgeIcons(u.badges, u.isAdmin)
+                                    BadgeIcons(u.badges, u.isAdmin, isPremium = u.isPremium)
                                 }
                             },
                             supportingContent = { Text("@${u.username}") },
@@ -279,7 +295,25 @@ fun ChatListScreen(
                         )
                     }
                 }
-                if (visible.isEmpty() && !loading && !(searching && foundUsers.isNotEmpty())) {
+                if (searching && foundChannels.isNotEmpty()) {
+                    item(key = "channels") {
+                        Text(
+                            "Каналы",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
+                        )
+                    }
+                    items(foundChannels, key = { "c_" + it.id }) { c ->
+                        ListItem(
+                            headlineContent = { Text(c.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            supportingContent = { Text("${subscribersText(c.memberCount)}" + c.description.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            leadingContent = { Avatar(c.title, repo.avatarUrl(c.avatarFileId), 48.dp) },
+                            modifier = Modifier.animateItem().combinedClickable(onClick = { onOpenChat(c.id) }),
+                        )
+                    }
+                }
+                if (visible.isEmpty() && !loading && !(searching && (foundUsers.isNotEmpty() || foundChannels.isNotEmpty()))) {
                     item(key = "empty") { EmptyState(searching, Modifier.animateItem()) }
                 }
             }
@@ -312,6 +346,13 @@ fun ChatListScreen(
                     headlineContent = { Text(if (chat.archived) "Вернуть из архива" else "В архив") },
                     leadingContent = { Icon(if (chat.archived) Icons.Default.Unarchive else Icons.Default.Archive, null) },
                     modifier = Modifier.combinedClickable(onClick = { act { repo.setArchived(chat.id, !chat.archived) } }),
+                )
+            }
+            if (chat.type == "channel" && chat.myRole != "owner") {
+                ListItem(
+                    headlineContent = { Text("Отписаться", color = MaterialTheme.colorScheme.error) },
+                    leadingContent = { Icon(Icons.AutoMirrored.Filled.ExitToApp, null, tint = MaterialTheme.colorScheme.error) },
+                    modifier = Modifier.combinedClickable(onClick = { act { repo.leave(chat.id) } }),
                 )
             }
             if (chat.type == "group") {
@@ -352,7 +393,8 @@ private fun ChatRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                     Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                    if (peer != null) BadgeIcons(peer.badges, peer.isAdmin, 16.dp)
+                    if (chat.type == "channel") Icon(Icons.Default.Campaign, null, Modifier.padding(start = 4.dp).size(16.dp), tint = scheme.primary)
+                    if (peer != null) BadgeIcons(peer.badges, peer.isAdmin, 16.dp, peer.isPremium)
                     if (chat.muted) Icon(Icons.Default.NotificationsOff, null, Modifier.padding(start = 4.dp).size(14.dp), tint = scheme.outline)
                 }
                 val last = chat.lastMessage
@@ -379,7 +421,7 @@ private fun ChatRow(
                             Spacer(Modifier.width(4.dp))
                             TypingDots(scheme.primary, 4.dp)
                         } else Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (chat.type != "saved" && chat.lastMessage != null) {
+                            if (chat.type != "saved" && chat.type != "channel" && chat.lastMessage != null) {
                                 Icon(Icons.Default.Lock, null, Modifier.size(12.dp), tint = scheme.outline)
                                 Spacer(Modifier.width(4.dp))
                             }
@@ -429,9 +471,57 @@ private fun EmptyState(searching: Boolean, modifier: Modifier) {
         Text(if (searching) "🔍" else "💬", style = MaterialTheme.typography.displayMedium)
         Spacer(Modifier.height(12.dp))
         Text(
-            if (searching) "Ничего не нашлось" else "Здесь пока пусто. Нажмите «Новый чат», чтобы найти друзей.",
+            if (searching) "Ничего не нашлось" else "Здесь пока пусто. Нажмите на карандаш в углу, чтобы написать другу, создать группу или канал.",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+fun subscribersText(n: Int): String {
+    val mod10 = n % 10
+    val mod100 = n % 100
+    val word = when {
+        mod10 == 1 && mod100 != 11 -> "подписчик"
+        mod10 in 2..4 && mod100 !in 12..14 -> "подписчика"
+        else -> "подписчиков"
+    }
+    return "$n $word"
+}
+
+private class DialItem(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector, val onClick: () -> Unit)
+
+/** Кнопка в углу: раскрывается в «Новый чат / группа / канал» с пружинкой. */
+@Composable
+private fun SpeedDial(open: Boolean, expanded: Boolean, onToggle: () -> Unit, items: List<DialItem>) {
+    val rotation by animateFloatAsState(if (open) 135f else 0f, spring(Spring.DampingRatioMediumBouncy), label = "rot")
+    Column(horizontalAlignment = Alignment.End) {
+        items.forEachIndexed { i, item ->
+            val delayMs = (items.size - 1 - i) * 40
+            AnimatedVisibility(
+                visible = open,
+                enter = fadeIn(androidx.compose.animation.core.tween(150, delayMs)) +
+                    scaleIn(spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium), initialScale = 0.4f, transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 1f)) +
+                    androidx.compose.animation.slideInVertically(spring(Spring.DampingRatioMediumBouncy)) { it },
+                exit = fadeOut() + scaleOut(targetScale = 0.6f),
+            ) {
+                Row(Modifier.padding(bottom = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest, shadowElevation = 2.dp, onClick = item.onClick) {
+                        Text(item.label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    androidx.compose.material3.SmallFloatingActionButton(
+                        onClick = item.onClick,
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    ) { Icon(item.icon, item.label) }
+                }
+            }
+        }
+        ExtendedFloatingActionButton(
+            onClick = onToggle,
+            expanded = expanded && !open,
+            icon = { Icon(Icons.Default.Add, null, Modifier.graphicsLayer { rotationZ = rotation }) },
+            text = { Text("Создать") },
         )
     }
 }

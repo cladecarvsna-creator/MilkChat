@@ -13,8 +13,8 @@ android {
         applicationId = "app.ryzik.chat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         // Адрес сервера по умолчанию: 10.0.2.2 — это компьютер, на котором запущен эмулятор.
         buildConfigField("String", "DEFAULT_SERVER", "\"http://10.0.2.2:8080\"")
     }
@@ -69,6 +69,14 @@ dependencies {
     implementation(libs.media3.ui)
     implementation(libs.datastore.preferences)
     implementation(libs.tink)
+    // Звонки: WebRTC (голос и видео напрямую между устройствами)
+    implementation("io.getstream:stream-webrtc-android:1.3.10")
+    // Квадратики: запись видео с камеры
+    implementation("androidx.camera:camera-core:1.4.1")
+    implementation("androidx.camera:camera-camera2:1.4.1")
+    implementation("androidx.camera:camera-lifecycle:1.4.1")
+    implementation("androidx.camera:camera-video:1.4.1")
+    implementation("androidx.camera:camera-view:1.4.1")
     debugImplementation(libs.compose.ui.tooling)
     testImplementation("junit:junit:4.13.2")
 }

@@ -142,6 +142,9 @@ fun MessageBubble(
     val c = msg.content
     val emojiOnly = style.bigEmoji && msg.type == "text" && c != null && isEmojiOnly(c.text)
     val isMedia = (msg.type == "image" || msg.type == "video") && c?.file != null
+    val isSquare = msg.type == "square" && c?.file != null && !msg.deleted
+    val bare = emojiOnly || isSquare
+    val context = LocalContext.current
 
     Box(
         Modifier
@@ -199,9 +202,15 @@ fun MessageBubble(
         ) {
             val bubbleModifier = Modifier
                 .clip(shape)
-                .then(if (emojiOnly) Modifier else Modifier.background(bubbleColor))
+                .then(if (bare) Modifier else Modifier.background(bubbleColor))
                 .combinedClickable(
-                    onClick = { if (msg.status == SendStatus.Failed) onRetry() else if (isMedia) onOpenMedia() },
+                    onClick = {
+                        when {
+                            msg.status == SendStatus.Failed -> onRetry()
+                            isSquare -> toggleSquare(context, msg)
+                            isMedia -> onOpenMedia()
+                        }
+                    },
                     onLongClick = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         onLongPress()
@@ -245,6 +254,8 @@ fun MessageBubble(
                     msg.type == "image" && c.file != null -> MediaImage(msg, c.file, autoDownload)
                     msg.type == "video" && c.file != null -> MediaVideo(msg, c.file, autoDownload)
                     msg.type == "file" && c.file != null -> FileAttachment(msg, c.file, onBubble, autoDownload)
+                    msg.type == "voice" && c.file != null -> VoiceContent(msg, c.file, onBubble, if (mine) scheme.primary else scheme.tertiary)
+                    msg.type == "square" && c.file != null -> SquareContent(msg, c.file, autoDownload)
                     else -> Unit
                 }
 
@@ -266,11 +277,11 @@ fun MessageBubble(
                 } else if (showMeta || msg.deleted) {
                     MetaRow(
                         msg, mine, read,
-                        if (isMedia) Color.White else onBubble.copy(alpha = 0.65f),
+                        if (isMedia || isSquare) Color.White else onBubble.copy(alpha = 0.65f),
                         Modifier
                             .align(Alignment.End)
                             .padding(6.dp)
-                            .then(if (isMedia) Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.35f)).padding(horizontal = 6.dp, vertical = 2.dp) else Modifier),
+                            .then(if (isMedia || isSquare) Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.35f)).padding(horizontal = 6.dp, vertical = 2.dp) else Modifier),
                     )
                 }
             }
@@ -539,6 +550,8 @@ fun previewOf(type: String, text: String, file: FileRef?): String = when (type) 
     "image" -> "🖼 Фото" + if (text.isNotBlank()) " · $text" else ""
     "video" -> "🎬 Видео" + if (text.isNotBlank()) " · $text" else ""
     "file" -> "📎 " + (file?.name ?: "Файл")
+    "voice" -> "🎤 Голосовое сообщение"
+    "square" -> "🟪 Видеосообщение"
     else -> text
 }
 

@@ -24,6 +24,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import okhttp3.Request
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -109,6 +115,10 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
     private val mediaDir = File(context.cacheDir, "media").apply { mkdirs() }
 
     @Volatile var openChatId: String? = null
+
+    private val _callSignals = MutableSharedFlow<Pair<String, JsonObject>>(extraBufferCapacity = 64)
+    /** Сигналы звонков: (от кого, данные). */
+    val callSignals: SharedFlow<Pair<String, JsonObject>> = _callSignals
 
     private var socket: WebSocket? = null
     private var socketJob: Job? = null
@@ -268,7 +278,11 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
         try {
             val list = api.chats()
             rememberUsers(list.flatMap { c -> c.members.map { it.user } })
-            chatsMutex.withLock { _chats.value = sortChats(list) }
+            chatsMutex.withLock {
+                // Каналы, которые человек просто смотрит (не подписан), сервер в списке не отдаёт — сохраняем их.
+                val previews = _chats.value.filter { it.type == "channel" && it.myRole == null && list.none { n -> n.id == it.id } }
+                _chats.value = sortChats(list + previews)
+            }
         } catch (_: Exception) {
         } finally {
             _chatsLoading.value = false
@@ -318,6 +332,22 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
     suspend fun setPinned(chatId: String, pinned: Boolean) = upsertChat(api.chatSettings(chatId, pinned = pinned))
     suspend fun setMuted(chatId: String, muted: Boolean) = upsertChat(api.chatSettings(chatId, muted = muted))
     suspend fun setArchived(chatId: String, archived: Boolean) = upsertChat(api.chatSettings(chatId, archived = archived))
+
+    suspend fun createChannel(title: String, description: String): Chat = api.createChannel(title, description).also { upsertChat(it) }
+
+    suspend fun searchChannels(q: String): List<Chat> = api.searchChannels(q)
+
+    suspend fun subscribe(chatId: String) = upsertChat(api.subscribe(chatId))
+
+    /** Отписаться от канала или выйти из группы. */
+    suspend fun leave(chatId: String) {
+        api.removeMember(chatId, myId ?: return)
+        _chats.update { l -> l.filterNot { it.id == chatId } }
+    }
+
+    suspend fun updateChannel(chatId: String, title: String, description: String) = upsertChat(api.updateChannel(chatId, title, description))
+
+    suspend fun setChannelAdmin(chatId: String, userId: String, admin: Boolean) = upsertChat(api.setChannelRole(chatId, userId, admin))
 
     fun savedChat(): Chat? = _chats.value.firstOrNull { it.type == "saved" }
 
@@ -371,8 +401,13 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
             decryptCache.containsKey(key) -> decryptCache[key]
             else -> {
                 val c = runCatching {
-                    val plain = E2E.decrypt(m.payload!!, myId!!, privateKey!!)
-                    AppJson.decodeFromString(Content.serializer(), plain)
+                    val obj = AppJson.parseToJsonElement(m.payload!!).jsonObject
+                    if (obj["v"]?.jsonPrimitive?.intOrNull == 0) {
+                        // Каналы публичные: сообщения в них не шифруются.
+                        AppJson.decodeFromJsonElement(Content.serializer(), obj["plain"]!!)
+                    } else {
+                        AppJson.decodeFromString(Content.serializer(), E2E.decrypt(m.payload!!, myId!!, privateKey!!))
+                    }
                 }.getOrNull()
                 decryptCache[key] = c
                 c
@@ -397,7 +432,8 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
         "image" -> "🖼 Фото" + c.text.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
         "video" -> "🎬 Видео" + c.text.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
         "file" -> "📎 ${c.file?.name ?: "Файл"}"
-        "voice" -> "🎤 Голосовое"
+        "voice" -> "🎤 Голосовое сообщение"
+        "square" -> "🟪 Видеосообщение"
         else -> c.text
     }
 
@@ -413,8 +449,15 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
         return out
     }
 
-    private fun encryptFor(chatId: String, content: Content): String =
-        E2E.encrypt(AppJson.encodeToString(Content.serializer(), content), recipientsOf(chatId))
+    private fun encryptFor(chatId: String, content: Content): String {
+        if (chat(chatId)?.type == "channel") {
+            return AppJson.encodeToString(JsonObject.serializer(), buildJsonObject {
+                put("v", 0)
+                put("plain", AppJson.encodeToJsonElement(Content.serializer(), content))
+            })
+        }
+        return E2E.encrypt(AppJson.encodeToString(Content.serializer(), content), recipientsOf(chatId))
+    }
 
     fun sendText(chatId: String, text: String, replyTo: String? = null) {
         val trimmed = text.trim()
@@ -514,6 +557,25 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
             uploadAndSend(chatId, type, local, content, replyTo, clientId)
         }
     }
+
+    /** Отправка записанного на устройстве: голосового или квадратного видеосообщения. */
+    fun sendRecorded(
+        chatId: String, file: File, type: String, mime: String, durationMs: Long,
+        waveform: String = "", width: Int = 0, height: Int = 0, replyTo: String? = null,
+    ) {
+        val clientId = UUID.randomUUID().toString()
+        val local = File(mediaDir, "local_$clientId")
+        if (!file.renameTo(local)) { file.copyTo(local, overwrite = true); file.delete() }
+        val ext = if (type == "voice") "m4a" else "mp4"
+        val content = Content(file = FileRef(
+            id = "", key = "", name = "$type-${System.currentTimeMillis()}.$ext", size = local.length(), mime = mime,
+            width = width, height = height, durationMs = durationMs, waveform = waveform,
+        ))
+        merge(chatId, listOf(pending(chatId, clientId, type, content, replyTo, null, local)))
+        uploadAndSend(chatId, type, local, content, replyTo, clientId)
+    }
+
+    fun recordingFile(ext: String): File = File(context.cacheDir, "rec_${UUID.randomUUID()}.$ext")
 
     private fun uploadAndSend(chatId: String, type: String, local: File, content: Content, replyTo: String?, clientId: String) {
         scope.launch(Dispatchers.IO) {
@@ -642,6 +704,20 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
     suspend fun grantBadge(userId: String, badgeId: String) = api.grantBadge(userId, badgeId).also { rememberUsers(listOf(it)) }
     suspend fun revokeBadge(userId: String, badgeId: String) = api.revokeBadge(userId, badgeId).also { rememberUsers(listOf(it)) }
     suspend fun setAdmin(userId: String, isAdmin: Boolean) = api.setAdmin(userId, isAdmin).also { rememberUsers(listOf(it)) }
+    suspend fun setPremium(userId: String, isPremium: Boolean) = api.setPremium(userId, isPremium).also { rememberUsers(listOf(it)) }
+
+    // ================= Звонки =================
+
+    suspend fun callsConfig(): JsonObject = api.callsConfig()
+
+    fun sendCallSignal(to: String, data: JsonObject): Boolean {
+        val msg = buildJsonObject {
+            put("type", "call.signal")
+            put("to", to)
+            put("data", data)
+        }
+        return socket?.send(AppJson.encodeToString(JsonObject.serializer(), msg)) == true
+    }
 
     // ================= Реальное время =================
 
@@ -736,6 +812,11 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
                 _users.update { m -> m[id]?.let { u -> m + (id to u.copy(online = ev.online == true, lastSeen = ev.lastSeen ?: u.lastSeen)) } ?: m }
             }
             "user.updated" -> ev.user?.let { rememberUsers(listOf(it)) }
+            "call.signal" -> {
+                val from = ev.from ?: return
+                val data = ev.data ?: return
+                _callSignals.emit(from to data)
+            }
         }
     }
 }

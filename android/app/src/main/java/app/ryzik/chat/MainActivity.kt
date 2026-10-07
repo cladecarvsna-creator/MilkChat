@@ -35,7 +35,14 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import app.ryzik.chat.call.CallPhase
 import app.ryzik.chat.data.AppSettings
+import app.ryzik.chat.ui.call.CallScreen
+import app.ryzik.chat.ui.channel.NewChannelScreen
+import app.ryzik.chat.ui.premium.PremiumScreen
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import app.ryzik.chat.data.AuthState
 import app.ryzik.chat.ui.admin.AdminScreen
 import app.ryzik.chat.ui.auth.AuthScreen
@@ -77,6 +84,13 @@ class MainActivity : ComponentActivity() {
                             if (loggedIn) MainNav(pendingChat.value) { pendingChat.value = null }
                             else OnboardingNav()
                         }
+                        // Звонок открывается поверх любого экрана.
+                        val call by app.calls.state.collectAsState()
+                        AnimatedVisibility(
+                            visible = call.phase != CallPhase.Idle,
+                            enter = slideInVertically { it } + fadeIn(),
+                            exit = slideOutVertically { it } + fadeOut(),
+                        ) { CallScreen() }
                     }
                 }
             }
@@ -142,6 +156,8 @@ private fun MainNav(pendingChat: String?, onPendingHandled: () -> Unit) {
             ChatListScreen(
                 onOpenChat = { nav.go("chat/$it") },
                 onNewChat = { nav.go("newchat") },
+                onNewGroup = { nav.go("newgroup") },
+                onNewChannel = { nav.go("newchannel") },
                 onOpenSettings = { nav.go("settings") },
                 onOpenProfile = { nav.go("profile/$it") },
             )
@@ -179,6 +195,20 @@ private fun MainNav(pendingChat: String?, onPendingHandled: () -> Unit) {
                 onOpenChat = { id -> nav.navigate("chat/$id") { popUpTo("chats") } },
             )
         }
+        composable("newgroup") {
+            NewChatScreen(
+                onBack = { nav.popBackStack() },
+                onOpenChat = { id -> nav.navigate("chat/$id") { popUpTo("chats") } },
+                startAsGroup = true,
+            )
+        }
+        composable("newchannel") {
+            NewChannelScreen(
+                onBack = { nav.popBackStack() },
+                onOpenChat = { id -> nav.navigate("chat/$id") { popUpTo("chats") } },
+            )
+        }
+        composable("premium") { PremiumScreen(onBack = { nav.popBackStack() }) }
         composable("addmembers/{id}") { e ->
             NewChatScreen(onBack = { nav.popBackStack() }, onOpenChat = {}, addToChatId = e.arguments?.getString("id"))
         }
@@ -194,12 +224,13 @@ private fun MainNav(pendingChat: String?, onPendingHandled: () -> Unit) {
                 onBack = { nav.popBackStack() },
                 onOpenSection = { nav.go("settings/${it.name}") },
                 onOpenAdmin = { nav.go("admin") },
+                onOpenPremium = { nav.go("premium") },
                 onOpenSaved = { repo.savedChat()?.let { nav.go("chat/${it.id}") } },
             )
         }
         composable("settings/{section}") { e ->
             val section = SettingsSection.valueOf(e.arguments?.getString("section")!!)
-            SettingsSectionScreen(section, onBack = { nav.popBackStack() }, onOpenTerms = { nav.go("terms") })
+            SettingsSectionScreen(section, onBack = { nav.popBackStack() }, onOpenTerms = { nav.go("terms") }, onOpenPremium = { nav.go("premium") })
         }
         composable("terms") { TermsScreen(onBack = { nav.popBackStack() }) }
         composable("admin") { AdminScreen(onBack = { nav.popBackStack() }, onOpenProfile = { nav.go("profile/$it") }) }

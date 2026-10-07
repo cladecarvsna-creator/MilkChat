@@ -69,10 +69,10 @@ import kotlinx.coroutines.launch
 /** Поиск людей по @username или имени. В режиме группы — выбор участников и название. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NewChatScreen(onBack: () -> Unit, onOpenChat: (String) -> Unit, addToChatId: String? = null) {
+fun NewChatScreen(onBack: () -> Unit, onOpenChat: (String) -> Unit, addToChatId: String? = null, startAsGroup: Boolean = false) {
     val repo = RyzikApp.instance.repo
     val scope = rememberCoroutineScope()
-    var groupMode by remember { mutableStateOf(addToChatId != null) }
+    var groupMode by remember { mutableStateOf(addToChatId != null || startAsGroup) }
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<User>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }

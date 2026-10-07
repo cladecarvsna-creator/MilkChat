@@ -13,6 +13,8 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
+import app.ryzik.chat.call.CallManager
+import app.ryzik.chat.call.CallNotifications
 import app.ryzik.chat.data.ChatRepository
 import app.ryzik.chat.data.Prefs
 import kotlinx.coroutines.CoroutineScope
@@ -26,6 +28,8 @@ class RyzikApp : Application() {
         private set
     lateinit var repo: ChatRepository
         private set
+    lateinit var calls: CallManager
+        private set
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -34,17 +38,23 @@ class RyzikApp : Application() {
         instance = this
         prefs = Prefs(this)
         repo = ChatRepository(this, prefs)
+        calls = CallManager(this, repo)
         createChannel()
+        CallNotifications.createChannel(this)
         scope.launch {
             repo.incoming.collect { (chat, msg) ->
                 val s = prefs.settings.first()
                 val foreground = ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
                 if (!s.notifications || chat.muted) return@collect
-                if (chat.type == "group" && !s.groupNotifications) return@collect
+                if ((chat.type == "group" || chat.type == "channel") && !s.groupNotifications) return@collect
                 if (foreground && repo.openChatId == chat.id) return@collect
                 if (foreground) return@collect
                 val sender = repo.users.value[msg.senderId]?.displayName ?: "Новое сообщение"
-                val title = if (chat.type == "group") "$sender · ${chat.title}" else sender
+                val title = when (chat.type) {
+                    "group" -> "$sender · ${chat.title}"
+                    "channel" -> chat.title
+                    else -> sender
+                }
                 val text = if (s.notificationPreview) {
                     msg.content?.let { repo.previewText(msg.type, it) } ?: "🔒 Сообщение"
                 } else "Новое сообщение"

@@ -1,5 +1,9 @@
 package app.ryzik.chat.ui.components
 
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -121,10 +125,11 @@ fun parseColor(hex: String): Color = runCatching { Color(android.graphics.Color.
 
 /** Маленькие значки рядом с именем. Выдаёт их только администратор. */
 @Composable
-fun BadgeIcons(badges: List<Badge>, isAdmin: Boolean = false, size: Dp = 18.dp) {
-    if (badges.isEmpty() && !isAdmin) return
+fun BadgeIcons(badges: List<Badge>, isAdmin: Boolean = false, size: Dp = 18.dp, isPremium: Boolean = false) {
+    if (badges.isEmpty() && !isAdmin && !isPremium) return
     Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
         Spacer(Modifier.width(4.dp))
+        if (isPremium) PremiumStar(size)
         if (isAdmin) Icon(Icons.Default.Verified, "Администратор", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(size))
         badges.take(3).forEach { b ->
             Box(
@@ -160,10 +165,10 @@ fun BadgeChip(badge: Badge, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun NameWithBadges(name: String, badges: List<Badge>, isAdmin: Boolean, style: TextStyle, modifier: Modifier = Modifier, color: Color = Color.Unspecified) {
+fun NameWithBadges(name: String, badges: List<Badge>, isAdmin: Boolean, style: TextStyle, modifier: Modifier = Modifier, color: Color = Color.Unspecified, isPremium: Boolean = false) {
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         Text(name, style = style, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-        BadgeIcons(badges, isAdmin, size = (style.fontSize.value + 2).dp)
+        BadgeIcons(badges, isAdmin, size = (style.fontSize.value + 2).dp, isPremium = isPremium)
     }
 }
 
@@ -242,4 +247,28 @@ fun formatSize(bytes: Long): String = when {
 fun formatDuration(ms: Long): String {
     val s = ms / 1000
     return "%d:%02d".format(s / 60, s % 60)
+}
+
+val PremiumGradient = listOf(Color(0xFF8E5CFF), Color(0xFFFF5CA8), Color(0xFFFFB443))
+
+/** Переливающаяся звезда Премиума рядом с именем. */
+@Composable
+fun PremiumStar(size: Dp = 18.dp) {
+    val t = rememberInfiniteTransition(label = "star")
+    val turn by t.animateFloat(0f, 1f, infiniteRepeatable(tween(3000, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "turn")
+    Icon(
+        Icons.Default.Star,
+        "Премиум",
+        modifier = Modifier
+            .size(size)
+            .graphicsLayer(compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen)
+            .drawWithCache {
+                val brush = Brush.linearGradient(PremiumGradient, start = Offset(0f, this.size.height * turn), end = Offset(this.size.width, this.size.height * (1 - turn)))
+                onDrawWithContent {
+                    drawContent()
+                    drawRect(brush, blendMode = BlendMode.SrcAtop)
+                }
+            },
+        tint = Color.White,
+    )
 }

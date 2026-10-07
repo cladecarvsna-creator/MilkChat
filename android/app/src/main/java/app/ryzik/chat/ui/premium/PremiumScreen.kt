@@ -1,0 +1,203 @@
+package app.ryzik.chat.ui.premium
+
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.CropSquare
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import app.ryzik.chat.RyzikApp
+import app.ryzik.chat.data.AuthState
+import app.ryzik.chat.ui.components.PremiumGradient
+import kotlinx.coroutines.delay
+import kotlin.math.cos
+import kotlin.math.sin
+
+const val PREMIUM_CONTACT = "ryzik3489"
+
+/** Экран Премиума. Получить его можно, написав владельцу в Telegram. */
+@Composable
+fun PremiumScreen(onBack: () -> Unit) {
+    val repo = RyzikApp.instance.repo
+    val auth by repo.auth.collectAsState()
+    val me = (auth as? AuthState.LoggedIn)?.me
+    val context = LocalContext.current
+
+    val t = rememberInfiniteTransition(label = "premium")
+    val spin by t.animateFloat(0f, 360f, infiniteRepeatable(tween(14000, easing = LinearEasing)), label = "spin")
+    val glow by t.animateFloat(0.85f, 1.1f, infiniteRepeatable(tween(1400, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "glow")
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFF1A0F33), Color(0xFF2B1452), Color(0xFF120A24)))),
+    ) {
+        Column(
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(Modifier.fillMaxWidth()) {
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", tint = Color.White) }
+            }
+            Box(Modifier.size(200.dp), contentAlignment = Alignment.Center) {
+                // Вращающиеся искры вокруг звезды
+                Canvas(Modifier.fillMaxSize().graphicsLayer { rotationZ = spin }) {
+                    val r = size.minDimension / 2.3f
+                    for (i in 0 until 12) {
+                        val a = Math.toRadians(i * 30.0)
+                        val c = Offset(center.x + (r * cos(a)).toFloat(), center.y + (r * sin(a)).toFloat())
+                        drawCircle(PremiumGradient[i % PremiumGradient.size].copy(alpha = 0.8f), radius = if (i % 2 == 0) 5f else 3f, center = c)
+                    }
+                }
+                Box(
+                    Modifier
+                        .size(110.dp)
+                        .graphicsLayer { scaleX = glow; scaleY = glow }
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(PremiumGradient)),
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Default.Star, null, tint = Color.White, modifier = Modifier.size(64.dp)) }
+            }
+            Text("RyzikChat Премиум", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (me?.isPremium == true) "У вас уже есть Премиум. Спасибо за поддержку! ✨"
+                else "Больше возможностей и звезда рядом с именем",
+                color = Color.White.copy(alpha = 0.8f),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 32.dp),
+            )
+            Spacer(Modifier.height(24.dp))
+
+            val perks = listOf(
+                Perk(Icons.Default.Star, "Звезда у имени", "Переливающийся значок Премиума виден всем"),
+                Perk(Icons.Default.CloudUpload, "Файлы до 2 ГБ", "Вместо 200 МБ без Премиума"),
+                Perk(Icons.Default.CropSquare, "Длинные квадратики", "Видеосообщения до 2 минут вместо 1"),
+                Perk(Icons.Default.Mic, "Длинные голосовые", "До 30 минут вместо 10"),
+                Perk(Icons.Default.Palette, "Особые цвета", "Эксклюзивные цвета оформления приложения"),
+                Perk(Icons.Default.Verified, "Поддержка проекта", "Вы помогаете RyzikChat развиваться"),
+            )
+            perks.forEachIndexed { i, p -> PerkRow(p, i) }
+
+            Spacer(Modifier.height(24.dp))
+            if (me?.isPremium != true) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                ) {
+                    Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Как получить Премиум", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Чтобы получить Премиум, напишите владельцу @$PREMIUM_CONTACT в Telegram. Укажите свой ник в RyzikChat: @${me?.username.orEmpty()}",
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Button(
+                            onClick = {
+                                val i = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/$PREMIUM_CONTACT")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                runCatching { context.startActivity(i) }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2AABEE), contentColor = Color.White),
+                            modifier = Modifier.fillMaxWidth().height(52.dp),
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.Send, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Написать @$PREMIUM_CONTACT в Telegram")
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(32.dp))
+        }
+    }
+}
+
+private class Perk(val icon: ImageVector, val title: String, val text: String)
+
+@Composable
+private fun PerkRow(p: Perk, index: Int) {
+    val appear = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        delay(80L * index)
+        appear.animateTo(1f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow))
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .graphicsLayer { alpha = appear.value.coerceIn(0f, 1f); translationX = (1f - appear.value) * 120f }
+            .padding(horizontal = 24.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(44.dp).clip(RoundedCornerShape(14.dp)).background(Brush.linearGradient(PremiumGradient)),
+            contentAlignment = Alignment.Center,
+        ) { Icon(p.icon, null, tint = Color.White) }
+        Spacer(Modifier.width(16.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(p.title, style = MaterialTheme.typography.titleMedium, color = Color.White)
+            Text(p.text, style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.7f))
+        }
+    }
+}

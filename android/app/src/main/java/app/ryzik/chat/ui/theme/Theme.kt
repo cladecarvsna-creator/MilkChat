@@ -40,7 +40,15 @@ val SeedColors = listOf(
     Color(0xFFD0346A) to "Малина",
     Color(0xFF8B5E3C) to "Какао",
     Color(0xFF5C5F66) to "Графит",
+    // Цвета ниже — только для Премиума
+    Color(0xFF9C4DFF) to "Аметист",
+    Color(0xFFFF4F8B) to "Неон",
+    Color(0xFFC9A227) to "Золото",
+    Color(0xFF00B8D4) to "Лёд",
 )
+
+/** С этого индекса в [SeedColors] начинаются премиум-цвета. */
+const val PREMIUM_SEEDS_FROM = 8
 
 private fun tone(seed: Color, lightness: Float, satMul: Float = 1f): Color {
     val hsl = FloatArray(3)

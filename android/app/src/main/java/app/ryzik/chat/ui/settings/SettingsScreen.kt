@@ -1,5 +1,9 @@
 package app.ryzik.chat.ui.settings
 
+import app.ryzik.chat.ui.theme.PREMIUM_SEEDS_FROM
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Code
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -108,6 +112,7 @@ enum class SettingsSection(val title: String, val subtitle: String, val icon: Im
     Privacy("Конфиденциальность", "Шифрование, сеансы, пароль", Icons.Default.Security),
     Data("Данные и память", "Автозагрузка, кэш", Icons.Default.Storage),
     Server("Сервер", "Адрес вашего сервера RyzikChat", Icons.Default.Dns),
+    Api("Открытый API", "Для своих приложений и других устройств", Icons.Default.Code),
     About("О приложении", "Версия, правила", Icons.Default.Info),
 }
 
@@ -118,6 +123,7 @@ fun SettingsScreen(
     onOpenSection: (SettingsSection) -> Unit,
     onOpenAdmin: () -> Unit,
     onOpenSaved: () -> Unit,
+    onOpenPremium: () -> Unit,
 ) {
     val repo = RyzikApp.instance.repo
     val auth by repo.auth.collectAsState()
@@ -176,6 +182,7 @@ fun SettingsScreen(
                         Spacer(Modifier.height(12.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(me.displayName, style = MaterialTheme.typography.headlineSmall)
+                            if (me.isPremium) app.ryzik.chat.ui.components.PremiumStar(22.dp)
                             IconButton(onClick = { name = me.displayName; bio = me.bio; editing = true }) {
                                 Icon(Icons.Default.Edit, "Изменить", Modifier.size(20.dp))
                             }
@@ -197,6 +204,19 @@ fun SettingsScreen(
             }
             item {
                 SettingsRow(Icons.Default.Bookmark, "Избранное", "Ваши сохранённые сообщения", onOpenSaved)
+            }
+            item {
+                ListItem(
+                    headlineContent = { Text("RyzikChat Премиум") },
+                    supportingContent = { Text(if (me.isPremium) "Активен ✨" else "Звезда у имени, файлы до 2 ГБ и не только") },
+                    leadingContent = {
+                        Box(
+                            Modifier.size(40.dp).clip(CircleShape).background(Brush.linearGradient(app.ryzik.chat.ui.components.PremiumGradient)),
+                            contentAlignment = Alignment.Center,
+                        ) { Icon(Icons.Default.Star, null, tint = Color.White) }
+                    },
+                    modifier = Modifier.clickable(onClick = onOpenPremium),
+                )
             }
             if (me.isAdmin) item {
                 SettingsRow(Icons.Default.AdminPanelSettings, "Админ-панель", "Бейджи и права пользователей", onOpenAdmin, accent = true)
@@ -268,7 +288,7 @@ private fun SettingsRow(icon: ImageVector, title: String, subtitle: String, onCl
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsSectionScreen(section: SettingsSection, onBack: () -> Unit, onOpenTerms: () -> Unit) {
+fun SettingsSectionScreen(section: SettingsSection, onBack: () -> Unit, onOpenTerms: () -> Unit, onOpenPremium: () -> Unit = {}) {
     val app = RyzikApp.instance
     val settings by app.prefs.settings.collectAsState(initial = AppSettings())
     val scope = rememberCoroutineScope()
@@ -288,12 +308,13 @@ fun SettingsSectionScreen(section: SettingsSection, onBack: () -> Unit, onOpenTe
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())) {
             when (section) {
-                SettingsSection.Appearance -> AppearanceSettings(settings, ::update)
+                SettingsSection.Appearance -> AppearanceSettings(settings, ::update, onOpenPremium)
                 SettingsSection.Chats -> ChatSettings(settings, ::update)
                 SettingsSection.Notifications -> NotificationSettings(settings, ::update)
                 SettingsSection.Privacy -> PrivacySettings(settings, ::update)
                 SettingsSection.Data -> DataSettings(settings, ::update)
                 SettingsSection.Server -> ServerSettings()
+                SettingsSection.Api -> ApiSettings()
                 SettingsSection.About -> AboutSettings(onOpenTerms)
             }
             Spacer(Modifier.height(32.dp))
@@ -317,7 +338,9 @@ private fun SwitchRow(title: String, subtitle: String? = null, checked: Boolean,
 }
 
 @Composable
-private fun AppearanceSettings(s: AppSettings, update: ((AppSettings) -> AppSettings) -> Unit) {
+private fun AppearanceSettings(s: AppSettings, update: ((AppSettings) -> AppSettings) -> Unit, onOpenPremium: () -> Unit) {
+    val auth by RyzikApp.instance.repo.auth.collectAsState()
+    val premium = (auth as? AuthState.LoggedIn)?.me?.isPremium == true
     Header("Тема")
     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         ThemeMode.entries.forEachIndexed { i, m ->
@@ -352,10 +375,13 @@ private fun AppearanceSettings(s: AppSettings, update: ((AppSettings) -> AppSett
                                     .size(size)
                                     .clip(CircleShape)
                                     .background(Brush.linearGradient(listOf(color, color.copy(alpha = 0.6f))))
-                                    .clickable { update { it.copy(seedColor = i) } },
+                                    .clickable {
+                                        if (i >= PREMIUM_SEEDS_FROM && !premium) onOpenPremium() else update { it.copy(seedColor = i) }
+                                    },
                                 contentAlignment = Alignment.Center,
                             ) {
                                 if (selected) Icon(Icons.Default.Check, null, tint = Color.White)
+                                else if (i >= PREMIUM_SEEDS_FROM) Icon(if (premium) Icons.Default.Star else Icons.Default.Lock, null, tint = Color.White, modifier = Modifier.size(18.dp))
                             }
                         }
                         Text(name, style = MaterialTheme.typography.labelSmall)
@@ -581,6 +607,53 @@ private fun ServerSettings() {
         }
         status?.let { Text(it) }
     }
+}
+
+@Composable
+private fun ApiSettings() {
+    val repo = RyzikApp.instance.repo
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val base = repo.api.baseUrl
+    var showToken by remember { mutableStateOf(false) }
+    fun open(url: String) {
+        runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
+    }
+    Column(Modifier.padding(16.dp)) {
+        Text(
+            "У RyzikChat открытый API: на нём можно сделать свой клиент для ПК, веба, часов или бота. " +
+                "Всё описано в спецификации OpenAPI 3, там же формат шифрования и события WebSocket.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+    Header("Документация")
+    ListItem(
+        headlineContent = { Text("Документация API") },
+        supportingContent = { Text("$base/api/docs") },
+        leadingContent = { Icon(Icons.Default.Description, null) },
+        modifier = Modifier.clickable { open("$base/api/docs") },
+    )
+    ListItem(
+        headlineContent = { Text("Спецификация OpenAPI (JSON)") },
+        supportingContent = { Text("$base/api/openapi.json") },
+        leadingContent = { Icon(Icons.Default.Code, null) },
+        modifier = Modifier.clickable { open("$base/api/openapi.json") },
+    )
+    Header("Как подключиться")
+    Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf(
+            "1. POST /api/auth/login → token",
+            "2. Заголовок Authorization: Bearer <token>",
+            "3. WebSocket $base/ws?token=<token> — новые сообщения, «печатает», звонки",
+            "4. Личные чаты и группы шифруются на устройстве (X25519 + AES-GCM), каналы — открытым текстом",
+        ).forEach { Text(it, style = MaterialTheme.typography.bodyMedium, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace) }
+    }
+    Header("Токен этого устройства")
+    ListItem(
+        headlineContent = { Text(if (showToken) (repo.api.token ?: "—") else "Показать токен") },
+        supportingContent = { Text("Никому не передавайте: с ним можно читать ваши чаты от вашего имени") },
+        leadingContent = { Icon(Icons.Default.Lock, null) },
+        modifier = Modifier.clickable { showToken = !showToken },
+    )
 }
 
 @Composable

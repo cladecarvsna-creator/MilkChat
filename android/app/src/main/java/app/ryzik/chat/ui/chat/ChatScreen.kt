@@ -1,5 +1,34 @@
 package app.ryzik.chat.ui.chat
 
+import kotlinx.coroutines.delay
+import app.ryzik.chat.ui.components.formatDuration
+import app.ryzik.chat.ui.chats.subscribersText
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.Button
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CropSquare
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Call
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -160,6 +189,69 @@ fun ChatScreen(
     val openedAt = remember { System.currentTimeMillis() }
     var lastTypingSent by remember { mutableLongStateOf(0L) }
 
+    // Голосовые и квадратики
+    val premium = (auth as? AuthState.LoggedIn)?.me?.isPremium == true
+    val voiceLimit = if (premium) 30 * 60_000L else 10 * 60_000L
+    val squareLimit = if (premium) 120_000L else 60_000L
+    var recordMode by remember { mutableStateOf("voice") }
+    val voiceRecorder = remember { VoiceRecorder(context) }
+    val squareRecorder = remember { SquareRecorder(context) }
+    var recordingVoice by remember { mutableStateOf(false) }
+    var voiceLevel by remember { mutableFloatStateOf(0f) }
+    var voiceElapsed by remember { mutableLongStateOf(0L) }
+    var dragX by remember { mutableFloatStateOf(0f) }
+    val cancelDistance = 120f * context.resources.displayMetrics.density
+    squareRecorder.onReady = { f, duration ->
+        val (w, h) = videoSize(f)
+        repo.sendRecorded(chatId, f, "square", "video/mp4", duration, width = w, height = h, replyTo = replyTo?.id)
+        replyTo = null
+    }
+    fun finishVoice(send: Boolean) {
+        if (!recordingVoice) return
+        recordingVoice = false
+        if (send) {
+            voiceRecorder.stop()?.let { r ->
+                repo.sendRecorded(chatId, r.file, "voice", "audio/mp4", r.durationMs, waveform = r.waveform, replyTo = replyTo?.id)
+                replyTo = null
+            }
+        } else voiceRecorder.cancel()
+    }
+    LaunchedEffect(recordingVoice) {
+        while (recordingVoice) {
+            voiceLevel = voiceRecorder.level()
+            voiceElapsed = voiceRecorder.elapsed()
+            if (voiceElapsed >= voiceLimit) finishVoice(true)
+            delay(100)
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            if (voiceRecorder.isRecording) voiceRecorder.cancel()
+            InlinePlayer.stop()
+        }
+    }
+    val recordPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
+    fun hasPermission(p: String) = ContextCompat.checkSelfPermission(context, p) == PackageManager.PERMISSION_GRANTED
+
+    // Звонки
+    var pendingCallVideo by remember { mutableStateOf<Boolean?>(null) }
+    val callPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
+        val video = pendingCallVideo ?: return@rememberLauncherForActivityResult
+        pendingCallVideo = null
+        val peerId = chat?.let { repo.peerOf(it) }?.id ?: return@rememberLauncherForActivityResult
+        if (res[Manifest.permission.RECORD_AUDIO] == true) app.calls.startCall(peerId, video && res[Manifest.permission.CAMERA] == true)
+        else error = "Для звонка нужен доступ к микрофону"
+    }
+    fun startCall(video: Boolean) {
+        val peerId = chat?.let { repo.peerOf(it) }?.id ?: return
+        val needed = buildList {
+            add(Manifest.permission.RECORD_AUDIO)
+            if (video) add(Manifest.permission.CAMERA)
+        }
+        if (needed.all { hasPermission(it) }) app.calls.startCall(peerId, video)
+        else { pendingCallVideo = video; callPermission.launch(needed.toTypedArray()) }
+    }
+
     DisposableEffect(chatId) {
         repo.openChatId = chatId
         onDispose { if (repo.openChatId == chatId) repo.openChatId = null }
@@ -232,7 +324,7 @@ fun ChatScreen(
                         Column {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                                if (peer != null) BadgeIcons(peer.badges, peer.isAdmin, 16.dp)
+                                if (peer != null) BadgeIcons(peer.badges, peer.isAdmin, 16.dp, peer.isPremium)
                             }
                             AnimatedContent(
                                 targetState = when {
@@ -251,6 +343,7 @@ fun ChatScreen(
                                     when (chat?.type) {
                                         "saved" -> "только для вас"
                                         "group" -> "участников: ${chat.members.size}"
+                                        "channel" -> subscribersText(chat.memberCount)
                                         else -> peer?.let { formatLastSeen(it.online, it.lastSeen) } ?: ""
                                     },
                                     style = MaterialTheme.typography.labelMedium,
@@ -261,6 +354,10 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    if (chat?.type == "direct" && peer != null) {
+                        IconButton(onClick = { startCall(false) }) { Icon(Icons.Default.Call, "Звонок") }
+                        IconButton(onClick = { startCall(true) }) { Icon(Icons.Default.Videocam, "Видеозвонок") }
+                    }
                     Box {
                         IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "Ещё") }
                         DropdownMenu(showMenu, onDismissRequest = { showMenu = false }) {
@@ -274,6 +371,16 @@ fun ChatScreen(
                                     text = { Text(if (chat.pinned) "Открепить чат" else "Закрепить чат") },
                                     leadingIcon = { Icon(Icons.Default.PushPin, null) },
                                     onClick = { showMenu = false; scope.launch { runCatching { repo.setPinned(chatId, !chat.pinned) } } },
+                                )
+                            }
+                            if (chat?.type == "channel" && chat.myRole != null && chat.myRole != "owner") {
+                                DropdownMenuItem(
+                                    text = { Text("Отписаться") },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.ExitToApp, null) },
+                                    onClick = {
+                                        showMenu = false
+                                        scope.launch { runCatching { repo.leave(chatId) }.onSuccess { onBack() }.onFailure { error = it.userMessage() } }
+                                    },
                                 )
                             }
                             DropdownMenuItem(
@@ -294,7 +401,7 @@ fun ChatScreen(
                     contentPadding = PaddingValues(vertical = 8.dp),
                 ) {
                     if (reversed.isEmpty()) {
-                        item(key = "hello") { EmptyChat(chat?.type == "saved") }
+                        item(key = "hello") { EmptyChat(chat?.type == "saved", chat?.type == "channel") }
                     }
                     items(reversed.size, key = { reversed[it].id }, contentType = { reversed[it].type }) { i ->
                         val m = reversed[i]
@@ -365,6 +472,15 @@ fun ChatScreen(
                 }
             }
 
+            val canPost = chat?.type != "channel" || chat.myRole == "owner" || chat.myRole == "admin"
+            if (!canPost && chat != null) {
+                ChannelBar(
+                    subscribed = chat.myRole != null,
+                    muted = chat.muted,
+                    onSubscribe = { scope.launch { runCatching { repo.subscribe(chatId) }.onFailure { error = it.userMessage() } } },
+                    onToggleMute = { scope.launch { runCatching { repo.setMuted(chatId, !chat.muted) } } },
+                )
+            } else
             // Панель ответа/редактирования
             Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
                 Column(Modifier.navigationBarsPadding().imePadding()) {
@@ -405,7 +521,9 @@ fun ChatScreen(
                                 )
                             }
                         }
-                        TextField(
+                        if (recordingVoice) {
+                            VoiceRecordingBar(voiceElapsed, dragX, cancelDistance, Modifier.weight(1f).height(56.dp))
+                        } else TextField(
                             value = input,
                             onValueChange = {
                                 input = it
@@ -440,15 +558,44 @@ fun ChatScreen(
                         ) { canSend ->
                             if (canSend) FilledIconButton(onClick = { send() }, modifier = Modifier.size(52.dp)) {
                                 Icon(if (editing != null) Icons.Default.Check else Icons.AutoMirrored.Filled.Send, "Отправить")
-                            } else FilledIconButton(
-                                onClick = { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
-                                modifier = Modifier.size(52.dp),
-                            ) { Icon(Icons.Default.Photo, "Фото") }
+                            } else RecordButton(
+                                mode = recordMode,
+                                recording = recordingVoice || squareRecorder.active,
+                                level = voiceLevel,
+                                onTap = { recordMode = if (recordMode == "voice") "square" else "voice" },
+                                onStart = {
+                                    val perms = if (recordMode == "voice") listOf(Manifest.permission.RECORD_AUDIO)
+                                    else listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+                                    if (!perms.all { hasPermission(it) }) {
+                                        recordPermission.launch(perms.toTypedArray())
+                                        false
+                                    } else if (recordMode == "voice") {
+                                        InlinePlayer.stop()
+                                        recordingVoice = voiceRecorder.start()
+                                        if (!recordingVoice) error = "Не удалось включить микрофон"
+                                        recordingVoice
+                                    } else {
+                                        InlinePlayer.stop()
+                                        squareRecorder.begin()
+                                        true
+                                    }
+                                },
+                                onDrag = { dragX = it },
+                                onEnd = { cancel ->
+                                    dragX = 0f
+                                    if (recordMode == "voice") finishVoice(!cancel) else squareRecorder.finish(send = !cancel)
+                                },
+                                cancelDistance = cancelDistance,
+                            )
                         }
                     }
                 }
             }
         }
+    }
+
+    if (squareRecorder.active) {
+        SquareRecordingOverlay(squareRecorder, squareLimit, (-dragX / cancelDistance).coerceIn(0f, 1f))
     }
 
     // Меню сообщения
@@ -505,7 +652,8 @@ fun ChatScreen(
                 SheetItem("Переслать", Icons.Default.Share) { menuFor = null; forwarding = m }
             }
             val me = (auth as? AuthState.LoggedIn)?.me
-            val canDelete = mine || me?.isAdmin == true || chat?.members?.any { it.user.id == myId && it.role == "owner" } == true
+            val canDelete = mine || me?.isAdmin == true || chat?.myRole == "owner" || (chat?.type == "channel" && chat.myRole == "admin") ||
+                chat?.members?.any { it.user.id == myId && it.role == "owner" } == true
             if (!m.deleted && canDelete) {
                 SheetItem("Удалить", Icons.Default.Delete, danger = true) {
                     menuFor = null
@@ -558,16 +706,20 @@ private fun DateChip(t: Long) {
 }
 
 @Composable
-private fun EmptyChat(saved: Boolean) {
+private fun EmptyChat(saved: Boolean, channel: Boolean = false) {
     Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
         Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.9f)) {
             Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(if (saved) "🔖" else "👋", fontSize = 56.sp)
+                Text(if (saved) "🔖" else if (channel) "📣" else "👋", fontSize = 56.sp)
                 Spacer(Modifier.height(8.dp))
-                Text(if (saved) "Избранное" else "Пока тихо", style = MaterialTheme.typography.titleMedium)
+                Text(if (saved) "Избранное" else if (channel) "В канале пока нет постов" else "Пока тихо", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    if (saved) "Пересылайте сюда сообщения, фото и файлы, чтобы не потерять." else "Напишите первым! Сообщения защищены сквозным шифрованием.",
+                    when {
+                        saved -> "Пересылайте сюда сообщения, фото и файлы, чтобы не потерять."
+                        channel -> "Здесь появятся посты, голосовые и квадратики владельца канала."
+                        else -> "Напишите первым! Сообщения защищены сквозным шифрованием."
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -579,4 +731,132 @@ private fun EmptyChat(saved: Boolean) {
 private fun copy(context: Context, text: String) {
     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     cm.setPrimaryClip(ClipData.newPlainText("message", text))
+}
+
+@Composable
+private fun ChannelBar(subscribed: Boolean, muted: Boolean, onSubscribe: () -> Unit, onToggleMute: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+        Box(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
+            AnimatedContent(subscribed, label = "sub", transitionSpec = { (scaleIn(spring(Spring.DampingRatioMediumBouncy)) + fadeIn()) togetherWith fadeOut() }) { sub ->
+                if (!sub) {
+                    Button(onClick = onSubscribe, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                        Icon(Icons.Default.Add, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Подписаться")
+                    }
+                } else {
+                    TextButton(onClick = onToggleMute, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                        Icon(if (muted) Icons.Default.Notifications else Icons.Default.NotificationsOff, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (muted) "Включить звук" else "Выключить звук")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceRecordingBar(elapsed: Long, dragX: Float, cancelDistance: Float, modifier: Modifier) {
+    val t = rememberInfiniteTransition(label = "hint")
+    val nudge by t.animateFloat(0f, -10f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "nudge")
+    val cancelP = (-dragX / cancelDistance).coerceIn(0f, 1f)
+    Row(modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        RecordingDot()
+        Spacer(Modifier.width(8.dp))
+        Text(formatDuration(elapsed), style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.weight(1f))
+        Text(
+            "‹ Влево — отмена",
+            color = if (cancelP > 0.6f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.graphicsLayer {
+                translationX = dragX * 0.6f + nudge * density
+                alpha = 1f - cancelP * 0.5f
+            },
+        )
+        Spacer(Modifier.width(12.dp))
+    }
+}
+
+/**
+ * Кнопка записи: нажатие переключает «голосовое» ↔ «квадратик»,
+ * удержание записывает, отпускание отправляет, свайп влево отменяет.
+ */
+@Composable
+private fun RecordButton(
+    mode: String,
+    recording: Boolean,
+    level: Float,
+    onTap: () -> Unit,
+    onStart: () -> Boolean,
+    onDrag: (Float) -> Unit,
+    onEnd: (cancel: Boolean) -> Unit,
+    cancelDistance: Float,
+) {
+    val tap by rememberUpdatedState(onTap)
+    val start by rememberUpdatedState(onStart)
+    val drag by rememberUpdatedState(onDrag)
+    val end by rememberUpdatedState(onEnd)
+    val haptic = LocalHapticFeedback.current
+    val scale by animateFloatAsState(if (recording) 1.5f else 1f, spring(Spring.DampingRatioMediumBouncy), label = "rec")
+    val pulse by animateFloatAsState(if (recording) 1f + level * 0.6f else 1f, label = "pulse")
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(52.dp)) {
+        if (recording) {
+            Box(
+                Modifier
+                    .size(52.dp)
+                    .graphicsLayer { scaleX = scale * pulse; scaleY = scale * pulse }
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
+            )
+        }
+        Box(
+            Modifier
+                .size(52.dp)
+                .graphicsLayer { scaleX = scale; scaleY = scale }
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary)
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        var released = false
+                        withTimeoutOrNull(250) {
+                            waitForUpOrCancellation()
+                            released = true
+                        }
+                        if (released) { tap(); return@awaitEachGesture }
+                        if (!start()) { waitForUpOrCancellation(); return@awaitEachGesture }
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        var cancelled = false
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!ch.pressed) break
+                            val dx = (ch.position.x - down.position.x).coerceAtMost(0f)
+                            drag(dx)
+                            ch.consume()
+                            if (dx < -cancelDistance) { cancelled = true; break }
+                        }
+                        end(cancelled)
+                        if (cancelled) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            waitForUpOrCancellation()
+                        }
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            AnimatedContent(
+                mode,
+                label = "mode",
+                transitionSpec = { (scaleIn(spring(Spring.DampingRatioMediumBouncy)) + fadeIn()) togetherWith (scaleOut() + fadeOut()) },
+            ) { m ->
+                Icon(
+                    if (m == "voice") Icons.Default.Mic else Icons.Default.CropSquare,
+                    if (m == "voice") "Голосовое" else "Квадратик",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+        }
+    }
 }
