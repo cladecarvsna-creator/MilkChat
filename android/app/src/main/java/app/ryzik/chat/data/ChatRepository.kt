@@ -371,7 +371,7 @@ class ChatRepository(private val context: Context, val prefs: Prefs) {
             decryptCache.containsKey(key) -> decryptCache[key]
             else -> {
                 val c = runCatching {
-                    val plain = E2E.decrypt(m.payload, myId!!, privateKey!!)
+                    val plain = E2E.decrypt(m.payload!!, myId!!, privateKey!!)
                     AppJson.decodeFromString(Content.serializer(), plain)
                 }.getOrNull()
                 decryptCache[key] = c

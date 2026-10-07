@@ -195,7 +195,7 @@ class ApiClient(
                 file.source().use { src ->
                     var sent = 0L
                     while (true) {
-                        val n = src.read(sink.buffer, 64 * 1024)
+                        val n = src.read(sink.buffer, 64 * 1024L)
                         if (n < 0) break
                         sent += n
                         sink.flush()

@@ -64,7 +64,7 @@ import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Shortcut
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -502,7 +502,7 @@ fun ChatScreen(
                 if (chat?.type != "saved") {
                     SheetItem("В Избранное", Icons.Default.Bookmark) { menuFor = null; repo.saveToFavorites(m) }
                 }
-                SheetItem("Переслать", Icons.Default.Shortcut) { menuFor = null; forwarding = m }
+                SheetItem("Переслать", Icons.Default.Share) { menuFor = null; forwarding = m }
             }
             val me = (auth as? AuthState.LoggedIn)?.me
             val canDelete = mine || me?.isAdmin == true || chat?.members?.any { it.user.id == myId && it.role == "owner" } == true

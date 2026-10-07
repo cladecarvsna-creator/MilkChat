@@ -156,6 +156,7 @@ private fun ZoomableImage(file: File, onTap: () -> Unit) {
     )
 }
 
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 private fun VideoPlayer(file: File) {
     val context = LocalContext.current
