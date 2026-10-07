@@ -53,3 +53,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: android/RyzikChat.apk
+      - name: Свежая сборка ветки ryzikchat
+        if: github.ref == 'refs/heads/ryzikchat'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ryzikchat-latest
+          name: RyzikChat (свежая сборка)
+          prerelease: true
+          make_latest: false
+          target_commitish: ${{ github.sha }}
+          body: "APK RyzikChat из ветки ryzikchat, коммит ${{ github.sha }}."
+          files: android/RyzikChat.apk
